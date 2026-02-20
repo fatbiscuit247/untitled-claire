@@ -18,7 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from dotenv import load_dotenv
 from collections import defaultdict
 from collections import Counter
-from typing import List
+from typing import List, Optional 
 import re
 from .vibe_v2 import (
     compute_composite_score,
@@ -41,6 +41,15 @@ from .vibe_v4 import (
      WEIGHTS_V4,
 )
 
+from bs4 import BeautifulSoup
+from .vibe_v5 import (
+    compute_composite_score_v5,
+    build_playlist_queries_v5,
+    parse_year,
+    analyze_lyrics,
+    WEIGHTS_V5,
+)
+
 
 
 load_dotenv()
@@ -48,6 +57,7 @@ load_dotenv()
 SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
 SPOTIFY_REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
+GENIUS_ACCESS_TOKEN = os.getenv("GENIUS_ACCESS_TOKEN")
 
 if not SPOTIFY_CLIENT_ID or not SPOTIFY_REDIRECT_URI or not SESSION_SECRET:
     raise RuntimeError("Missing env vars.")
@@ -1791,3 +1801,397 @@ def spotify_vibe_v4(request: Request, track_id: str, limit: int = 20):
             "max_cooccurrence": max_cooccurrence,
         }
     }
+
+# ============================================================
+# GENIUS API HELPERS (add these before the endpoint)
+# ============================================================
+
+def genius_search(song_name: str, artist_name: str) -> dict | None:
+    """
+    Search Genius for a song. Returns song info with URL.
+    """
+    if not GENIUS_ACCESS_TOKEN:
+        return None
+    
+    query = f"{song_name} {artist_name}"
+    url = "https://api.genius.com/search"
+    headers = {"Authorization": f"Bearer {GENIUS_ACCESS_TOKEN}"}
+    params = {"q": query}
+    
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        if r.status_code != 200:
+            print(f"Genius search failed: {r.status_code}")
+            return None
+        
+        data = r.json()
+        hits = data.get("response", {}).get("hits", [])
+        
+        if not hits:
+            return None
+        
+        # Return first hit
+        return hits[0].get("result")
+    except Exception as e:
+        print(f"Genius search error: {e}")
+        return None
+
+
+def fetch_lyrics_from_genius(genius_url: str) -> str | None:
+    """
+    Scrape lyrics from a Genius song page.
+    """
+    try:
+        r = requests.get(genius_url, timeout=10)
+        if r.status_code != 200:
+            return None
+        
+        soup = BeautifulSoup(r.text, "lxml")
+        
+        # Genius stores lyrics in divs with data-lyrics-container="true"
+        lyrics_containers = soup.find_all("div", {"data-lyrics-container": "true"})
+        
+        if not lyrics_containers:
+            # Fallback: try older format
+            lyrics_div = soup.find("div", class_="lyrics")
+            if lyrics_div:
+                return lyrics_div.get_text(separator="\n").strip()
+            return None
+        
+        lyrics_parts = []
+        for container in lyrics_containers:
+            # Get text, replacing <br> with newlines
+            text = container.get_text(separator="\n")
+            lyrics_parts.append(text)
+        
+        return "\n".join(lyrics_parts).strip()
+    except Exception as e:
+        print(f"Lyrics fetch error: {e}")
+        return None
+
+
+def get_lyrics_for_track(song_name: str, artist_name: str) -> str | None:
+    """
+    Get lyrics for a track via Genius API + scraping.
+    """
+    # Search for the song
+    song_info = genius_search(song_name, artist_name)
+    if not song_info:
+        return None
+    
+    # Get the Genius URL
+    genius_url = song_info.get("url")
+    if not genius_url:
+        return None
+    
+    # Fetch and return lyrics
+    return fetch_lyrics_from_genius(genius_url)
+
+
+# ============================================================
+# ENDPOINT
+# ============================================================
+
+@app.get("/spotify/vibe_v5")
+def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
+    """
+    Playlist co-occurrence + Lyrics analysis recommendations.
+    
+    Combines:
+    - Playlist co-occurrence (which songs humans group together)
+    - Lyrics similarity (themes, sentiment, mood)
+    - Era, genre, popularity signals
+    """
+    
+    # =========================================
+    # 1) FETCH SEED TRACK METADATA
+    # =========================================
+    
+    seed, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
+    if err:
+        return {"error": "Could not fetch seed track", "details": err}
+    
+    seed_name = seed.get("name", "")
+    seed_artists = seed.get("artists", []) or []
+    seed_artist_ids = set(a.get("id") for a in seed_artists if a.get("id"))
+    seed_artist_name = seed_artists[0].get("name", "") if seed_artists else ""
+    seed_album = seed.get("album", {}) or {}
+    seed_year = parse_year(seed_album.get("release_date"))
+    
+    # Fetch genres
+    seed_genres = []
+    if seed_artist_ids:
+        artist_ids_str = ",".join(list(seed_artist_ids)[:5])
+        artists_data, err = spotify_get_json(request, "/artists", params={"ids": artist_ids_str})
+        if not err:
+            for a in artists_data.get("artists", []) or []:
+                seed_genres.extend(a.get("genres", []))
+    seed_genres = list(dict.fromkeys(seed_genres))[:10]
+    
+    # =========================================
+    # 2) FETCH SEED LYRICS & ANALYZE
+    # =========================================
+    
+    seed_lyrics = get_lyrics_for_track(seed_name, seed_artist_name)
+    seed_lyrics_analysis = analyze_lyrics(seed_lyrics) if seed_lyrics else {}
+    
+    # =========================================
+    # 3) FIND PLAYLISTS & TRACK CO-OCCURRENCE
+    # =========================================
+    
+    candidate_playlist_count: dict[str, int] = defaultdict(int)
+    candidate_data: dict[str, dict] = {}
+    playlists_searched = 0
+    playlists_with_seed = 0
+    
+    queries = build_playlist_queries_v5(seed_name, seed_artist_name)
+    
+    for query in queries:
+        pdata, err = spotify_get_json(
+            request,
+            "/search",
+            params={"q": query, "type": "playlist", "limit": 5, "market": "US"}
+        )
+        if err:
+            continue
+        
+        playlists = pdata.get("playlists", {}).get("items", []) or []
+        
+        for playlist in playlists:
+            if not playlist:
+                continue
+            
+            pid = playlist.get("id")
+            if not pid:
+                continue
+            
+            playlists_searched += 1
+            
+            tracks_data, err = spotify_get_json(
+                request,
+                f"/playlists/{pid}/tracks",
+                params={"limit": 50, "market": "US"}
+            )
+            if err:
+                continue
+            
+            items = tracks_data.get("items", []) or []
+            
+            playlist_track_ids = set()
+            for item in items:
+                t = (item or {}).get("track")
+                if t and t.get("id"):
+                    playlist_track_ids.add(t["id"])
+            
+            seed_in_playlist = track_id in playlist_track_ids
+            if seed_in_playlist:
+                playlists_with_seed += 1
+            
+            for item in items:
+                t = (item or {}).get("track")
+                if not t or not t.get("id"):
+                    continue
+                
+                tid = t["id"]
+                if tid == track_id:
+                    continue
+                
+                if seed_in_playlist:
+                    candidate_playlist_count[tid] += 2
+                else:
+                    candidate_playlist_count[tid] += 1
+                
+                if tid not in candidate_data:
+                    album = t.get("album", {}) or {}
+                    candidate_data[tid] = {
+                        "id": tid,
+                        "name": t.get("name", ""),
+                        "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
+                        "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
+                        "album": album.get("name", ""),
+                        "release_date": album.get("release_date"),
+                        "popularity": t.get("popularity", 0),
+                        "image": (album.get("images") or [{}])[0].get("url"),
+                        "url": (t.get("external_urls", {}) or {}).get("spotify"),
+                    }
+    
+    if not candidate_data:
+        return {
+            "seed": {"id": track_id, "name": seed_name, "artists": [a.get("name") for a in seed_artists]},
+            "count": 0,
+            "results": [],
+            "debug": {"error": "No candidates found in playlists"}
+        }
+    
+    # =========================================
+    # 4) FETCH GENRES FOR CANDIDATES
+    # =========================================
+    
+    all_artist_ids = set()
+    for c in candidate_data.values():
+        all_artist_ids.update(c.get("artist_ids", []))
+    
+    genres_by_artist = {}
+    artist_id_list = list(all_artist_ids)
+    for i in range(0, len(artist_id_list), 50):
+        batch = artist_id_list[i:i+50]
+        ids_str = ",".join(batch)
+        artists_data, err = spotify_get_json(request, "/artists", params={"ids": ids_str})
+        if not err:
+            for a in (artists_data.get("artists", []) or []):
+                if a and a.get("id"):
+                    genres_by_artist[a["id"]] = a.get("genres", [])
+    
+    # =========================================
+    # 5) FETCH LYRICS FOR TOP CANDIDATES & SCORE
+    # =========================================
+    
+    # Sort candidates by playlist count to prioritize lyrics fetching
+    sorted_candidates = sorted(
+        candidate_data.items(),
+        key=lambda x: candidate_playlist_count.get(x[0], 0),
+        reverse=True
+    )
+    
+    max_cooccurrence = max(candidate_playlist_count.values()) if candidate_playlist_count else 1
+    scored_results = []
+    lyrics_fetched = 0
+    max_lyrics_fetch = 30  # limit API calls
+    
+    # Cache for lyrics analysis
+    lyrics_cache: dict[str, dict] = {}
+    
+    for tid, c in sorted_candidates[:100]:  # limit to top 100 candidates
+        # Build candidate genres
+        candidate_genres = []
+        for aid in c.get("artist_ids", []):
+            candidate_genres.extend(genres_by_artist.get(aid, []))
+        candidate_genres = list(dict.fromkeys(candidate_genres))
+        
+        # Filter junk
+        filter_obj = {
+            "name": c.get("name", ""),
+            "album": c.get("album", ""),
+            "artists": c.get("artists", []),
+        }
+        if looks_like_cover(filter_obj):
+            continue
+        if looks_like_seasonal(filter_obj):
+            continue
+        
+        # Fetch lyrics for top candidates (if we have seed lyrics)
+        candidate_lyrics_analysis = {}
+        if seed_lyrics_analysis and lyrics_fetched < max_lyrics_fetch:
+            cand_name = c.get("name", "")
+            cand_artist = c.get("artists", [""])[0] if c.get("artists") else ""
+            
+            cache_key = f"{cand_name}|{cand_artist}".lower()
+            
+            if cache_key in lyrics_cache:
+                candidate_lyrics_analysis = lyrics_cache[cache_key]
+            else:
+                cand_lyrics = get_lyrics_for_track(cand_name, cand_artist)
+                if cand_lyrics:
+                    candidate_lyrics_analysis = analyze_lyrics(cand_lyrics)
+                    lyrics_cache[cache_key] = candidate_lyrics_analysis
+                    lyrics_fetched += 1
+        
+        # Get co-occurrence count
+        cooccur_count = candidate_playlist_count.get(tid, 0)
+        
+        # Score
+        score_result = compute_composite_score_v5(
+            seed_name=seed_name,
+            seed_genres=seed_genres,
+            seed_year=seed_year,
+            seed_artist_ids=seed_artist_ids,
+            seed_lyrics_analysis=seed_lyrics_analysis,
+            candidate=c,
+            candidate_genres=candidate_genres,
+            candidate_lyrics_analysis=candidate_lyrics_analysis,
+            cooccurrence_count=cooccur_count,
+            max_cooccurrence=max_cooccurrence,
+        )
+        
+        c["score"] = score_result["final_score"]
+        c["score_components"] = score_result["components"]
+        
+        # Add lyrics info (for debugging, not the actual lyrics)
+        if candidate_lyrics_analysis:
+            top_themes = sorted(
+                candidate_lyrics_analysis.get("themes", {}).items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:3]
+            c["detected_themes"] = [t[0] for t in top_themes if t[1] > 0.3]
+        
+        scored_results.append(c)
+    
+    # Sort by score
+    scored_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+    
+    # =========================================
+    # 6) DIVERSITY CAPS + OUTPUT
+    # =========================================
+    
+    final_results = apply_diversity_caps(scored_results, max_per_artist=2, max_from_seed_album=2)
+    final_results = final_results[:limit]
+    
+    # Clean up
+    for r in final_results:
+        r.pop("artist_ids", None)
+    
+    # Seed themes for debug
+    seed_top_themes = []
+    if seed_lyrics_analysis:
+        top = sorted(
+            seed_lyrics_analysis.get("themes", {}).items(),
+            key=lambda x: x[1],
+            reverse=True
+        )[:3]
+        seed_top_themes = [t[0] for t in top if t[1] > 0.3]
+    
+    return {
+        "seed": {
+            "id": track_id,
+            "name": seed_name,
+            "artists": [a.get("name", "") for a in seed_artists],
+            "album": seed_album.get("name"),
+            "year": seed_year,
+            "genres": seed_genres[:5],
+            "url": (seed.get("external_urls", {}) or {}).get("spotify"),
+            "detected_themes": seed_top_themes,
+            "lyrics_found": bool(seed_lyrics),
+        },
+        "weights": WEIGHTS_V5,
+        "count": len(final_results),
+        "results": final_results,
+        "debug": {
+            "playlists_searched": playlists_searched,
+            "playlists_with_seed": playlists_with_seed,
+            "unique_candidates": len(candidate_data),
+            "candidates_scored": len(scored_results),
+            "lyrics_fetched": lyrics_fetched,
+            "max_cooccurrence": max_cooccurrence,
+        }
+    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
