@@ -49,6 +49,8 @@ from .vibe_v5 import (
     analyze_lyrics,
     WEIGHTS_V5,
 )
+#lyrics caching flow to hopefully optimize search
+from .lyrics_cache import get_cached_lyrics, cache_lyrics, get_cache_stats
 
 
 
@@ -1874,6 +1876,11 @@ def get_lyrics_for_track(song_name: str, artist_name: str) -> str | None:
     """
     Get lyrics for a track via Genius API + scraping.
     """
+    # Check cache first
+    cached = get_cached_lyrics(song_name, artist_name)
+    if cached:
+        return cached
+    
     # Search for the song
     song_info = genius_search(song_name, artist_name)
     if not song_info:
@@ -1884,8 +1891,16 @@ def get_lyrics_for_track(song_name: str, artist_name: str) -> str | None:
     if not genius_url:
         return None
     
-    # Fetch and return lyrics
-    return fetch_lyrics_from_genius(genius_url)
+    # Fetch lyrics
+    lyrics = fetch_lyrics_from_genius(genius_url)
+    
+    # Cache if successful
+    if lyrics:
+        cache_lyrics(song_name, artist_name, lyrics)
+    
+    return lyrics
+    
+    
 
 
 # ============================================================
