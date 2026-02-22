@@ -22,26 +22,7 @@ from typing import List, Optional
 import re
 
 
-from .vibe_v2 import (
-    compute_composite_score,
-    build_genre_search_queries,
-    parse_year,
-    WEIGHTS,
-)
 
-from .vibe_v3 import (
-    compute_composite_score_v3,
-    build_search_queries_v3,
-    parse_year,
-    WEIGHTS_V3,
-)
-
-from .vibe_v4 import (
-     compute_composite_score_v4,
-     build_playlist_queries_v4,
-     parse_year,
-     WEIGHTS_V4,
-)
 
 from bs4 import BeautifulSoup
 from .vibe_v5 import (
@@ -71,33 +52,6 @@ if not SPOTIFY_CLIENT_ID or not SPOTIFY_REDIRECT_URI or not SESSION_SECRET:
 INDEX_PATH = "index.json"
 
 ###Helper Functions
-
-def extract_features_from_bytes(audio_bytes: bytes):
-    import io
-
-    y, sr = librosa.load(io.BytesIO(audio_bytes), sr=22050, mono=True, duration=30)
-
-    # MFCC = timbre fingerprint (core of production feel)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
-
-    # average across time to get fixed-size vector
-    mfcc_mean = np.mean(mfcc, axis=1)
-
-    return mfcc_mean.tolist()
-
-def cosine_similarity(a, b):
-    a = np.array(a, dtype=np.float32)
-    b = np.array(b, dtype=np.float32)
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10))
-
-
-
-
-def load_index():
-    if not Path(INDEX_PATH).exists():
-        return None
-    with open(INDEX_PATH, "r") as f:
-        return json.load(f)
 
 def spotify_get(request: Request, url: str, params: dict | None = None):
     token = request.session.get("spotify_access_token")
@@ -141,20 +95,6 @@ def apply_diversity_caps(results, max_per_artist=5, max_from_seed_album=5):
 
         out.append(r)
 
-    return out
-
-def cap_seed_artist(results: list[dict], seed_artist_names: list[str], max_seed_tracks: int = 2) -> list[dict]:
-    seed_set = set((a or "").lower() for a in seed_artist_names)
-    count = 0
-    out = []
-    for r in results:
-        artists = [(x or "").lower() for x in (r.get("artists") or [])]
-        is_seed = any(a in seed_set for a in artists)
-        if is_seed:
-            if count >= max_seed_tracks:
-                continue
-            count += 1
-        out.append(r)
     return out
 
 
@@ -310,41 +250,6 @@ def norm(s: str) -> str:
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
-def find_best_local_match(index: list[dict], seed_name: str, seed_artists: list[str]) -> dict | None:
-    """
-    index entries look like: {"filename": "...", "features": [...]}
-    We try to match by filename containing artist + title tokens.
-    """
-    target_title = norm(seed_name)
-    target_artist = norm(seed_artists[0] if seed_artists else "")
-
-    best = None
-    best_score = 0
-
-    for item in index:
-        fname = norm(item.get("filename", ""))
-
-        # simple token overlap score
-        score = 0
-        if target_title and target_title in fname:
-            score += 3
-        if target_artist and target_artist in fname:
-            score += 2
-
-        # partial overlap bonus
-        title_tokens = set(target_title.split())
-        fname_tokens = set(fname.split())
-        score += len(title_tokens & fname_tokens) * 0.2
-
-        if score > best_score:
-            best_score = score
-            best = item
-
-    # require minimum confidence
-    if best_score >= 2.5:
-        return best
-    return None
-
 
 def parse_year(date_str: str | None) -> int | None:
     # Spotify release_date can be "YYYY", "YYYY-MM-DD", or "YYYY-MM"
@@ -354,60 +259,6 @@ def parse_year(date_str: str | None) -> int | None:
         return int(date_str[:4])
     except Exception:
         return None
-
-def jaccard(a: list[str], b: list[str]) -> float:
-    sa, sb = set(a or []), set(b or [])
-    if not sa or not sb:
-        return 0.0
-    return len(sa & sb) / len(sa | sb)
-
-def get_related_artists(request: Request, artist_id: str) -> list[dict]:
-    data, err = spotify_get_json(request, f"/artists/{artist_id}/related-artists")
-    if err:
-        return []
-    return data.get("artists", []) or []
-
-def add_artist_album_tracks(request: Request, artist_id: str, candidates: list, max_albums: int = 3, tracks_per_album: int = 10):
-    # get artist albums (albums + singles)
-    albums, err = spotify_get_json(
-        request,
-        f"/artists/{artist_id}/albums",
-        params={"include_groups": "album,single", "limit": 20, "market": "US"},
-    )
-    if err:
-        return
-
-    items = albums.get("items", []) or []
-    # de-dupe by album id
-    seen_albums = set()
-    picked = []
-    for a in items:
-        aid = a.get("id")
-        if not aid or aid in seen_albums:
-            continue
-        seen_albums.add(aid)
-        picked.append(aid)
-        if len(picked) >= max_albums:
-            break
-
-    for alb_id in picked:
-        tracks, err = spotify_get_json(
-            request,
-            f"/albums/{alb_id}/tracks",
-            params={"limit": tracks_per_album, "market": "US"},
-        )
-        if err:
-            continue
-        for t in tracks.get("items", []):
-            if not t or not t.get("id"):
-                continue
-            candidates.append({
-                "id": t["id"],
-                "name": t.get("name", ""),
-                "artists": [ar.get("name","") for ar in t.get("artists", [])],
-                "artist_ids": [ar.get("id") for ar in t.get("artists", []) if ar.get("id")],
-                "source": "artist_catalog",
-            })
 
 
 
@@ -441,31 +292,468 @@ app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET)
 @app.get("/", response_class=HTMLResponse)
 def home():
     return """
-    <html>
-      <body style="font-family: Arial; max-width: 720px; margin: 40px auto;">
-        <h1>Vibe Finder (Prototype)</h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vibe Finder</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 40px 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 8px;
+            background: linear-gradient(90deg, #1DB954, #1ed760);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+        }
+        
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .search-box input {
+            flex: 1;
+            padding: 14px 18px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            background: rgba(255,255,255,0.1);
+            color: #fff;
+            outline: none;
+        }
+        
+        .search-box input::placeholder {
+            color: #888;
+        }
+        
+        .search-box input:focus {
+            background: rgba(255,255,255,0.15);
+        }
+        
+        .search-box button {
+            padding: 14px 28px;
+            font-size: 16px;
+            border: none;
+            border-radius: 8px;
+            background: #1DB954;
+            color: #fff;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        
+        .search-box button:hover {
+            background: #1ed760;
+        }
+        
+        .section-title {
+            font-size: 1.2rem;
+            margin: 30px 0 15px 0;
+            color: #ccc;
+        }
+        
+        .results-grid {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .track-card {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .track-card:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .track-card.selected {
+            background: rgba(29, 185, 84, 0.2);
+            border: 1px solid #1DB954;
+        }
+        
+        .track-card img {
+            width: 56px;
+            height: 56px;
+            border-radius: 4px;
+            object-fit: cover;
+        }
+        
+        .track-info {
+            flex: 1;
+        }
+        
+        .track-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .track-artist {
+            color: #888;
+            font-size: 14px;
+        }
+        
+        .track-meta {
+            text-align: right;
+            font-size: 12px;
+            color: #666;
+        }
+        
+        .recommendation-card {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            transition: background 0.2s;
+        }
+        
+        .recommendation-card:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .recommendation-card img {
+            width: 64px;
+            height: 64px;
+            border-radius: 4px;
+            object-fit: cover;
+        }
+        
+        .rec-info {
+            flex: 1;
+        }
+        
+        .rec-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .rec-name a {
+            color: #fff;
+            text-decoration: none;
+        }
+        
+        .rec-name a:hover {
+            text-decoration: underline;
+        }
+        
+        .rec-artist {
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+        
+        .rec-themes {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        
+        .theme-tag {
+            padding: 3px 8px;
+            background: rgba(29, 185, 84, 0.2);
+            color: #1DB954;
+            border-radius: 12px;
+            font-size: 11px;
+        }
+        
+        .rec-score {
+            text-align: right;
+            min-width: 60px;
+        }
+        
+        .score-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: #1DB954;
+        }
+        
+        .score-label {
+            font-size: 11px;
+            color: #666;
+        }
+        
+        .seed-info {
+            background: rgba(29, 185, 84, 0.1);
+            border: 1px solid rgba(29, 185, 84, 0.3);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .seed-info img {
+            width: 80px;
+            height: 80px;
+            border-radius: 4px;
+        }
+        
+        .seed-details h3 {
+            margin-bottom: 4px;
+        }
+        
+        .seed-details p {
+            color: #888;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #888;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 3px solid rgba(255,255,255,0.1);
+            border-top-color: #1DB954;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .error {
+            background: rgba(255, 100, 100, 0.1);
+            border: 1px solid rgba(255, 100, 100, 0.3);
+            padding: 15px;
+            border-radius: 8px;
+            color: #ff6b6b;
+        }
+        
+        .login-prompt {
+            text-align: center;
+            padding: 40px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+        }
+        
+        .login-prompt a {
+            display: inline-block;
+            margin-top: 15px;
+            padding: 12px 24px;
+            background: #1DB954;
+            color: #fff;
+            text-decoration: none;
+            border-radius: 24px;
+            font-weight: 600;
+        }
+        
+        .login-prompt a:hover {
+            background: #1ed760;
+        }
+        
+        #search-results, #recommendations {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Vibe Finder</h1>
+        <p class="subtitle">Find songs that match your vibe</p>
+        
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search for a song..." autocomplete="off">
+            <button onclick="searchSongs()">Search</button>
+        </div>
+        
+        <div id="login-prompt" class="login-prompt" style="display: none;">
+            <p>Please log in with Spotify to search for songs</p>
+            <a href="/auth/login">Log in with Spotify</a>
+        </div>
+        
+        <div id="search-results">
+            <h2 class="section-title">Select a song</h2>
+            <div id="search-results-list" class="results-grid"></div>
+        </div>
+        
+        <div id="recommendations">
+            <h2 class="section-title">Seed Track</h2>
+            <div id="seed-info"></div>
+            
+            <h2 class="section-title">Recommended Tracks</h2>
+            <div id="recommendations-list" class="results-grid"></div>
+        </div>
+    </div>
+    
+    <script>
+        const searchInput = document.getElementById('search-input');
+        const searchResultsDiv = document.getElementById('search-results');
+        const searchResultsList = document.getElementById('search-results-list');
+        const recommendationsDiv = document.getElementById('recommendations');
+        const recommendationsList = document.getElementById('recommendations-list');
+        const seedInfoDiv = document.getElementById('seed-info');
+        const loginPrompt = document.getElementById('login-prompt');
+        
+        // Search on Enter key
+        searchInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') searchSongs();
+        });
+        
+        async function searchSongs() {
+            const query = searchInput.value.trim();
+            if (!query) return;
+            
+            searchResultsList.innerHTML = '<div class="loading"><div class="spinner"></div><p>Searching...</p></div>';
+            searchResultsDiv.style.display = 'block';
+            recommendationsDiv.style.display = 'none';
+            loginPrompt.style.display = 'none';
+            
+            try {
+                const response = await fetch(`/spotify/search?q=${encodeURIComponent(query)}&limit=6`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    if (data.error === 'Not logged in. Go to /auth/login first.') {
+                        searchResultsDiv.style.display = 'none';
+                        loginPrompt.style.display = 'block';
+                        return;
+                    }
+                    searchResultsList.innerHTML = `<div class="error">${data.error}</div>`;
+                    return;
+                }
+                
+                if (!data.results || data.results.length === 0) {
+                    searchResultsList.innerHTML = '<div class="error">No songs found. Try a different search.</div>';
+                    return;
+                }
+                
+                searchResultsList.innerHTML = data.results.map(track => `
+                    <div class="track-card" onclick="getRecommendations('${track.id}', this)">
+                        <img src="${track.image || 'https://via.placeholder.com/56'}" alt="">
+                        <div class="track-info">
+                            <div class="track-name">${escapeHtml(track.name)}</div>
+                            <div class="track-artist">${escapeHtml(track.artists.join(', '))}</div>
+                        </div>
+                        <div class="track-meta">${track.album || ''}</div>
+                    </div>
+                `).join('');
+                
+            } catch (err) {
+                searchResultsList.innerHTML = `<div class="error">Error searching: ${err.message}</div>`;
+            }
+        }
+        
+        async function getRecommendations(trackId, element) {
+            // Highlight selected
+            document.querySelectorAll('.track-card').forEach(el => el.classList.remove('selected'));
+            element.classList.add('selected');
+            
+            recommendationsList.innerHTML = '<div class="loading"><div class="spinner"></div><p>Finding similar vibes...</p></div>';
+            recommendationsDiv.style.display = 'block';
+            
+            try {
+                const response = await fetch(`/spotify/vibe_v5?track_id=${trackId}&limit=10`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    recommendationsList.innerHTML = `<div class="error">${data.error}</div>`;
+                    return;
+                }
+                
+                // Show seed info
+                const seed = data.seed;
+                seedInfoDiv.innerHTML = `
+                    <div class="seed-info">
+                        <img src="${element.querySelector('img').src}" alt="">
+                        <div class="seed-details">
+                            <h3>${escapeHtml(seed.name)}</h3>
+                            <p>${escapeHtml(seed.artists.join(', '))} · ${seed.year || ''}</p>
+                            <div class="rec-themes">
+                                ${(seed.detected_themes || []).map(t => `<span class="theme-tag">${t}</span>`).join('')}
+                                ${seed.lyrics_found ? '<span class="theme-tag">lyrics ✓</span>' : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                // Show recommendations
+                if (!data.results || data.results.length === 0) {
+                    recommendationsList.innerHTML = '<div class="error">No recommendations found.</div>';
+                    return;
+                }
+                
+                recommendationsList.innerHTML = data.results.map(track => `
+                    <div class="recommendation-card">
+                        <img src="${track.image || 'https://via.placeholder.com/64'}" alt="">
+                        <div class="rec-info">
+                            <div class="rec-name">
+                                <a href="${track.url}" target="_blank">${escapeHtml(track.name)}</a>
+                            </div>
+                            <div class="rec-artist">${escapeHtml(track.artists.join(', '))}</div>
+                            <div class="rec-themes">
+                                ${(track.detected_themes || []).map(t => `<span class="theme-tag">${t}</span>`).join('')}
+                            </div>
+                        </div>
+                        <div class="rec-score">
+                            <div class="score-value">${Math.round(track.score * 100)}</div>
+                            <div class="score-label">match</div>
+                        </div>
+                    </div>
+                `).join('');
+                
+            } catch (err) {
+                recommendationsList.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>
+"""
 
-        <p>
-          <a href="/auth/login" style="font-weight:bold;">
-            Log in with Spotify
-          </a>
-        </p>
 
-        <h3>1) Health Check</h3>
-        <p>Open <a href="/health">/health</a></p>
 
-        <h3>2) Upload audio (real recommend)</h3>
-        <form action="/recommend" enctype="multipart/form-data" method="post">
-          <input name="audio" type="file" accept="audio/*" />
-          <button type="submit" style="margin-left: 8px;">Find similar</button>
-        </form>
 
-        <p style="margin-top: 20px; color: #666;">
-          Now supports Spotify login.
-        </p>
-      </body>
-    </html>
-    """
+
 
 
 @app.get("/health")
@@ -633,1178 +921,7 @@ def spotify_search(request: Request, q: str, limit: int = 10, prefer_artist: str
     return {"query": q, "count": min(limit, len(cleaned)), "results": cleaned[:limit]}
 
 
-@app.get("/spotify/vibe")
-def spotify_vibe(request: Request, track_id: str, limit: int = 20):
-    """
-    "Similar songs" without downloading/uploading music.
-    Strategy:
-      1) Fetch seed track + seed audio-features
-      2) Build a candidate pool from:
-         - related artists (top tracks via artist search/playlists you already do)
-         - playlists found via search queries
-         - seed album tracks (small contribution, but capped)
-      3) Hydrate candidates (track metadata + audio-features)
-      4) Score by audio-feature similarity (NOT same artist)
-      5) Penalize same-artist, filter covers/seasonal, apply diversity caps
-    """
 
-    print("spotify_vibe called with track_id =", track_id)
-
-    # -------------------------
-    # 1) Seed track + audio features
-    # -------------------------
-    seed, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
-    if err:
-        return err
-
-    seed_artists = seed.get("artists", []) or []
-    seed_artist_ids = [a.get("id") for a in seed_artists if a.get("id")]
-    seed_artist_name = (seed_artists[0].get("name") if seed_artists else "") or ""
-    seed_album_id = (seed.get("album", {}) or {}).get("id")
-    seed_track_name = (seed.get("name") or "") or ""
-    seed_artist_set = set(seed_artist_ids)
-
-    seed_af, err = spotify_get_json(request, f"/audio-features/{track_id}")
-    # audio-features sometimes fails for local/unavailable tracks; handle gracefully
-    if err:
-        seed_af = None
-
-    # -------------------------
-    # 2) Build candidates pool (no /recommendations)
-    # -------------------------
-    candidates: list[dict] = []
-
-    # 2a) small amount from seed album (helps, but will be capped later)
-    if seed_album_id:
-        album_tracks, err = spotify_get_json(
-            request,
-            f"/albums/{seed_album_id}/tracks",
-            params={"limit": 20, "market": "US"},
-        )
-        if not err:
-            for t in (album_tracks.get("items", []) or []):
-                tid = t.get("id")
-                if not tid or tid == track_id:
-                    continue
-                candidates.append({
-                    "id": tid,
-                    "name": t.get("name", ""),
-                    "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                    "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                    "source": "album",
-                })
-
-    # 2b) related artists (strong signal for "similar", but we will still re-rank by audio)
-    related_artist_ids: list[str] = []
-    if seed_artist_ids:
-        rel = get_related_artists(request, seed_artist_ids[0])
-        for a in (rel or [])[:12]:
-            rid = a.get("id")
-            if rid:
-                related_artist_ids.append(rid)
-
-    # Pull some tracks from playlists based on seed artist + seed track.
-    # (This avoids "classic rock playlist" generic noise.)
-    queries = []
-    if seed_artist_name:
-        queries += [f"{seed_artist_name} similar", f"{seed_artist_name} radio"]
-    if seed_track_name:
-        queries += [f"{seed_track_name} similar", f"songs like {seed_track_name}"]
-
-    for q in queries:
-        add_playlist_tracks_as_candidates(request, q, candidates, max_playlists=1, per_playlist=10)
-
-    # Optionally: also sample playlists based on related artist names (adds breadth)
-    # We do this lightly to avoid random drift.
-    if related_artist_ids:
-        # fetch a few related artist objects to get their names for queries
-        ids = ",".join(related_artist_ids[:5])
-        related_data, err = spotify_get_json(request, "/artists", params={"ids": ids})
-        if not err:
-            for a in (related_data.get("artists", []) or [])[:5]:
-                nm = (a.get("name") or "").strip()
-                if nm:
-                    add_playlist_tracks_as_candidates(request, f"{nm} radio", candidates, max_playlists=1, per_playlist=6)
-
-    # remove seed + dedupe
-    candidates = [c for c in candidates if c.get("id") and c["id"] != track_id]
-    candidates = dedupe_tracks(candidates)
-
-    if not candidates:
-        return {
-            "seed": {
-                "id": track_id,
-                "name": seed_track_name,
-                "artists": [a.get("name", "") for a in seed_artists],
-                "url": (seed.get("external_urls", {}) or {}).get("spotify"),
-            },
-            "count": 0,
-            "results": [],
-            "debug": {"note": "No candidates found from playlists/album/related sources."}
-        }
-
-    # -------------------------
-    # 3) Hydrate track metadata (album/image/url/popularity/release_date)
-    # -------------------------
-    hydrate_ids = ",".join([c["id"] for c in candidates[:50]])
-    by_id = {}
-
-    if hydrate_ids:
-        full, err = spotify_get_json(request, "/tracks", params={"ids": hydrate_ids, "market": "US"})
-        if not err:
-            by_id = {t["id"]: t for t in (full.get("tracks", []) or []) if t and t.get("id")}
-
-    hydrated: list[dict] = []
-    for c in candidates[:50]:
-        t = by_id.get(c["id"])
-        if not t:
-            continue
-        alb = (t.get("album", {}) or {})
-        hydrated.append({
-            **c,
-            "name": t.get("name", c.get("name", "")),
-            "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-            "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-            "url": (t.get("external_urls", {}) or {}).get("spotify"),
-            "album": alb.get("name", ""),
-            "image": (alb.get("images")[0]["url"] if alb.get("images") else None),
-            "popularity": t.get("popularity", 0),
-            "release_date": alb.get("release_date"),
-        })
-
-    # -------------------------
-    # 4) Filter junk early (covers/seasonal/etc.)
-    # -------------------------
-    filtered = []
-    for c in hydrated:
-        tmp = normalize_for_filtering(c)
-        tmp["album"] = c.get("album", tmp["album"])
-
-        if looks_like_cover(tmp):
-            continue
-        if looks_like_seasonal(tmp):
-            continue
-
-        filtered.append(c)
-
-    if not filtered:
-        return {
-            "seed": {
-                "id": track_id,
-                "name": seed_track_name,
-                "artists": [a.get("name", "") for a in seed_artists],
-                "url": (seed.get("external_urls", {}) or {}).get("spotify"),
-            },
-            "count": 0,
-            "results": [],
-            "debug": {"note": "All candidates filtered out as cover/seasonal/junk."}
-        }
-
-    # -------------------------
-    # 5) Fetch audio-features for candidates in batch + score similarity
-    # -------------------------
-    def _norm_tempo(x):
-        # tempo can be ~60-200+. normalize into ~0-1-ish
-        try:
-            return float(x) / 200.0
-        except Exception:
-            return None
-
-    def _vec_from_af(af: dict):
-        # Pick stable core dimensions for "vibe"
-        # (All are 0-1 except tempo.)
-        return [
-            af.get("danceability"),
-            af.get("energy"),
-            af.get("speechiness"),
-            af.get("acousticness"),
-            af.get("instrumentalness"),
-            af.get("liveness"),
-            af.get("valence"),
-            _norm_tempo(af.get("tempo")),
-        ]
-
-    def _dist(a, b, w):
-        # weighted euclidean on shared dims
-        s = 0.0
-        used = 0
-        for i in range(len(w)):
-            if a[i] is None or b[i] is None:
-                continue
-            d = (float(a[i]) - float(b[i]))
-            s += w[i] * (d * d)
-            used += 1
-        if used == 0:
-            return None
-        return s ** 0.5
-
-    # If we don't have seed audio-features, we can't do real similarity
-    # so we fall back to popularity + playlist sources (still penalize same-artist).
-    seed_vec = _vec_from_af(seed_af) if seed_af else None
-
-    # Batch fetch audio-features for candidate ids
-    af_ids = ",".join([c["id"] for c in filtered[:50]])
-    af_by_id = {}
-    if af_ids:
-        af_data, err = spotify_get_json(request, "/audio-features", params={"ids": af_ids})
-        if not err:
-            for af in (af_data.get("audio_features", []) or []):
-                if af and af.get("id"):
-                    af_by_id[af["id"]] = af
-
-    # weights (tweakable)
-    # energy/valence/danceability dominate "feel"
-    weights = [1.2, 1.4, 0.4, 0.9, 0.5, 0.5, 1.3, 0.8]
-
-    scored = []
-    for c in filtered:
-        cid = c["id"]
-        caf = af_by_id.get(cid)
-        same_artist = any(aid in seed_artist_set for aid in (c.get("artist_ids") or []))
-
-        # Base score: audio similarity if possible
-        audio_score = None
-        if seed_vec and caf:
-            cvec = _vec_from_af(caf)
-            d = _dist(seed_vec, cvec, weights)
-            if d is not None:
-                # convert distance to similarity-ish (higher is better)
-                audio_score = 1.0 / (1.0 + d)
-
-        # Build final score:
-        # - if audio_score exists: heavily use it
-        # - else: fall back to popularity + source weight
-        source_weight = {"playlist": 0.15, "album": 0.10, "artist_top": 0.12, "artist_catalog": 0.10}
-        base = (audio_score * 10.0) if audio_score is not None else 0.0
-        base += (float(c.get("popularity", 0) or 0) / 100.0) * 1.0
-        base += source_weight.get(c.get("source", ""), 0.05)
-
-        # BIG IMPORTANT PART: penalize same-artist so it doesn't become "just Queen"
-        if same_artist:
-            base -= 0.75
-
-        c["audio_score"] = round(audio_score, 4) if audio_score is not None else None
-        c["final_score"] = round(base, 4)
-        scored.append(c)
-
-    scored.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-
-    # -------------------------
-    # 6) Diversity caps + limit
-    # -------------------------
-    top = apply_diversity_caps(scored, max_per_artist=2, max_from_seed_album=3)
-    top = top[:limit]
-
-    source_counts = Counter([c.get("source") for c in candidates])
-
-    return {
-        "debug": {
-            "seed_audio_features_ok": bool(seed_af),
-            "candidate_source_counts": dict(source_counts),
-            "same_artist_penalty_enabled": True,
-            "audio_scored_count": sum(1 for r in top if r.get("audio_score") is not None),
-        },
-        "seed": {
-            "id": track_id,
-            "name": seed_track_name,
-            "artists": [a.get("name", "") for a in seed_artists],
-            "url": (seed.get("external_urls", {}) or {}).get("spotify"),
-        },
-        "count": len(top),
-        "results": top,
-    }
-
-   
-
-@app.get("/spotify/track")
-def spotify_track(request: Request, track_id: str):
-    data, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
-    if err:
-        return err
-    return {
-        "id": data.get("id"),
-        "name": data.get("name"),
-        "artists": [a["name"] for a in data.get("artists", [])],
-        "album": (data.get("album", {}) or {}).get("name"),
-        "url": (data.get("external_urls", {}) or {}).get("spotify"),
-    }
-
-@app.get("/spotify/vibe_local")
-def spotify_vibe_local(request: Request, track_id: str, limit: int = 10):
-    index = load_index()
-    if index is None:
-        return {"error": "index.json not found. Run POST /index first."}
-
-    # get seed track metadata from spotify
-    seed, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
-    if err:
-        return err
-
-    seed_name = seed.get("name", "")
-    seed_artists = [a.get("name", "") for a in seed.get("artists", [])]
-
-    # find a matching local file
-    match = find_best_local_match(index, seed_name, seed_artists)
-    if not match:
-        return {
-            "error": "No matching local file found for this Spotify track.",
-            "seed": {"id": track_id, "name": seed_name, "artists": seed_artists},
-            "tip": "Add the song to your music/ folder (filename should include artist + title), then POST /index again."
-        }
-
-    # compute similarity against local index
-    query_features = match["features"]
-    scored = []
-    for item in index:
-        score = cosine_similarity(query_features, item["features"])
-        scored.append({"filename": item["filename"], "score": score})
-
-    scored.sort(key=lambda x: x["score"], reverse=True)
-
-    return {
-        "seed": {
-            "id": track_id,
-            "name": seed_name,
-            "artists": seed_artists,
-            "matched_local_file": match["filename"],
-        },
-        "count": min(limit, len(scored)),
-        "results": scored[:limit],
-    }
-
-"""
-Add this endpoint to your main.py
-
-This is the refactored /spotify/vibe_v2 endpoint that uses multi-signal scoring.
-"""
-
-# Add this import at the top of main.py:
-# from vibe_v2 import (
-#     compute_composite_score,
-#     build_genre_search_queries,
-#     parse_year,
-#     WEIGHTS,
-# )
-
-
-@app.get("/spotify/vibe_v2")
-def spotify_vibe_v2(request: Request, track_id: str, limit: int = 20):
-    """
-    Multi-signal "more like this" recommendations.
-    
-    Combines:
-    - Audio features (energy, valence, tempo, key, etc.)
-    - Genre overlap
-    - Era/decade proximity
-    - Related artist graph
-    - Key/mode compatibility
-    """
-    
-    # =========================================
-    # 1) FETCH SEED TRACK + ALL METADATA
-    # =========================================
-    
-    # Basic track info
-    seed, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
-    if err:
-        return {"error": "Could not fetch seed track", "details": err}
-    
-    seed_name = seed.get("name", "")
-    seed_artists = seed.get("artists", []) or []
-    seed_artist_ids = set(a.get("id") for a in seed_artists if a.get("id"))
-    seed_artist_name = seed_artists[0].get("name", "") if seed_artists else ""
-    seed_album = seed.get("album", {}) or {}
-    seed_album_id = seed_album.get("id")
-    seed_year = parse_year(seed_album.get("release_date"))
-    
-    # Audio features for seed
-    seed_af, err = spotify_get_json(request, f"/audio-features/{track_id}")
-    if err:
-        seed_af = {}
-        print(f"Warning: Could not fetch audio features for seed: {err}")
-    
-    # Genres from seed artist(s)
-    seed_genres = []
-    if seed_artist_ids:
-        artist_ids_str = ",".join(list(seed_artist_ids)[:5])
-        artists_data, err = spotify_get_json(request, "/artists", params={"ids": artist_ids_str})
-        if not err:
-            for a in artists_data.get("artists", []) or []:
-                seed_genres.extend(a.get("genres", []))
-    seed_genres = list(dict.fromkeys(seed_genres))[:10]  # dedupe, cap at 10
-    
-    # Related artists
-    related_artist_ids = set()
-    if seed_artist_ids:
-        primary_artist_id = list(seed_artist_ids)[0]
-        rel_data, err = spotify_get_json(request, f"/artists/{primary_artist_id}/related-artists")
-        if not err:
-            for a in (rel_data.get("artists", []) or [])[:20]:
-                if a.get("id"):
-                    related_artist_ids.add(a["id"])
-    
-    # =========================================
-    # 2) BUILD CANDIDATE POOL
-    # =========================================
-    
-    candidates: list[dict] = []
-    
-    # 2a) Related artists' top tracks
-    for artist_id in list(related_artist_ids)[:10]:
-        top_tracks, err = spotify_get_json(
-            request,
-            f"/artists/{artist_id}/top-tracks",
-            params={"market": "US"}
-        )
-        if err:
-            continue
-        for t in (top_tracks.get("tracks", []) or [])[:5]:
-            if not t or not t.get("id") or t["id"] == track_id:
-                continue
-            candidates.append({
-                "id": t["id"],
-                "name": t.get("name", ""),
-                "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                "album": (t.get("album", {}) or {}).get("name", ""),
-                "release_date": (t.get("album", {}) or {}).get("release_date"),
-                "popularity": t.get("popularity", 0),
-                "image": ((t.get("album", {}) or {}).get("images") or [{}])[0].get("url"),
-                "url": (t.get("external_urls", {}) or {}).get("spotify"),
-                "source": "related_artist_top",
-            })
-    
-    # 2b) Seed album tracks (capped)
-    if seed_album_id:
-        album_tracks, err = spotify_get_json(
-            request,
-            f"/albums/{seed_album_id}/tracks",
-            params={"limit": 15, "market": "US"}
-        )
-        if not err:
-            for t in (album_tracks.get("items", []) or []):
-                tid = t.get("id")
-                if not tid or tid == track_id:
-                    continue
-                candidates.append({
-                    "id": tid,
-                    "name": t.get("name", ""),
-                    "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                    "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                    "source": "seed_album",
-                })
-    
-    # 2c) Genre-based playlist search
-    search_queries = build_genre_search_queries(seed_genres, seed_name, seed_artist_name)
-    
-    for query in search_queries[:6]:
-        add_playlist_tracks_as_candidates(
-            request, query, candidates,
-            max_playlists=1, per_playlist=8
-        )
-    
-    # 2d) Direct track search for similar terms
-    if seed_genres:
-        genre_query = f"{seed_genres[0]} {seed_year or ''}"
-        search_data, err = spotify_get_json(
-            request, "/search",
-            params={"q": genre_query, "type": "track", "limit": 20, "market": "US"}
-        )
-        if not err:
-            for t in (search_data.get("tracks", {}).get("items", []) or []):
-                if not t or not t.get("id") or t["id"] == track_id:
-                    continue
-                candidates.append({
-                    "id": t["id"],
-                    "name": t.get("name", ""),
-                    "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                    "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                    "album": (t.get("album", {}) or {}).get("name", ""),
-                    "release_date": (t.get("album", {}) or {}).get("release_date"),
-                    "popularity": t.get("popularity", 0),
-                    "image": ((t.get("album", {}) or {}).get("images") or [{}])[0].get("url"),
-                    "url": (t.get("external_urls", {}) or {}).get("spotify"),
-                    "source": "genre_search",
-                })
-    
-    # Deduplicate
-    candidates = dedupe_tracks(candidates)
-    candidates = [c for c in candidates if c.get("id") != track_id]
-    
-    if not candidates:
-        return {
-            "seed": {"id": track_id, "name": seed_name, "artists": [a.get("name") for a in seed_artists]},
-            "count": 0,
-            "results": [],
-            "debug": {"error": "No candidates found"}
-        }
-    
-    # =========================================
-    # 3) HYDRATE CANDIDATES (metadata + audio features + genres)
-    # =========================================
-    
-    # Batch fetch track metadata
-    candidate_ids = [c["id"] for c in candidates[:100]]
-    tracks_by_id = {}
-    
-    for i in range(0, len(candidate_ids), 50):
-        batch = candidate_ids[i:i+50]
-        ids_str = ",".join(batch)
-        tracks_data, err = spotify_get_json(request, "/tracks", params={"ids": ids_str, "market": "US"})
-        if not err:
-            for t in (tracks_data.get("tracks", []) or []):
-                if t and t.get("id"):
-                    tracks_by_id[t["id"]] = t
-    
-    # Batch fetch audio features
-    af_by_id = {}
-    for i in range(0, len(candidate_ids), 100):
-        batch = candidate_ids[i:i+100]
-        ids_str = ",".join(batch)
-        af_data, err = spotify_get_json(request, "/audio-features", params={"ids": ids_str})
-        if not err:
-            for af in (af_data.get("audio_features", []) or []):
-                if af and af.get("id"):
-                    af_by_id[af["id"]] = af
-    
-    # Collect unique artist IDs for genre lookup
-    all_artist_ids = set()
-    for c in candidates[:100]:
-        all_artist_ids.update(c.get("artist_ids", []))
-    
-    # Batch fetch artist genres
-    genres_by_artist = {}
-    artist_id_list = list(all_artist_ids)
-    for i in range(0, len(artist_id_list), 50):
-        batch = artist_id_list[i:i+50]
-        ids_str = ",".join(batch)
-        artists_data, err = spotify_get_json(request, "/artists", params={"ids": ids_str})
-        if not err:
-            for a in (artists_data.get("artists", []) or []):
-                if a and a.get("id"):
-                    genres_by_artist[a["id"]] = a.get("genres", [])
-    
-    # =========================================
-    # 4) FILTER + SCORE CANDIDATES
-    # =========================================
-    
-    scored_results = []
-    
-    for c in candidates[:100]:
-        cid = c["id"]
-        
-        # Get hydrated data
-        track_data = tracks_by_id.get(cid, {})
-        candidate_af = af_by_id.get(cid, {})
-        
-        # Build candidate genres from all artists
-        candidate_genres = []
-        for aid in c.get("artist_ids", []):
-            candidate_genres.extend(genres_by_artist.get(aid, []))
-        candidate_genres = list(dict.fromkeys(candidate_genres))
-        
-        # Update candidate with hydrated metadata
-        album = track_data.get("album", {}) or {}
-        c.update({
-            "name": track_data.get("name", c.get("name", "")),
-            "artists": [a.get("name", "") for a in (track_data.get("artists", []) or c.get("artists", []))],
-            "album": album.get("name", c.get("album", "")),
-            "release_date": album.get("release_date", c.get("release_date")),
-            "popularity": track_data.get("popularity", c.get("popularity", 0)),
-            "image": (album.get("images") or [{}])[0].get("url", c.get("image")),
-            "url": (track_data.get("external_urls", {}) or {}).get("spotify", c.get("url")),
-            "genres": candidate_genres,
-        })
-        
-        # Filter: covers/seasonal/junk
-        filter_obj = {
-            "name": c.get("name", ""),
-            "album": c.get("album", ""),
-            "artists": c.get("artists", []),
-        }
-        if looks_like_cover(filter_obj):
-            continue
-        if looks_like_seasonal(filter_obj):
-            continue
-        
-        # Compute composite score
-        score_result = compute_composite_score(
-            seed_af=seed_af,
-            seed_genres=seed_genres,
-            seed_year=seed_year,
-            seed_artist_ids=seed_artist_ids,
-            related_artist_ids=related_artist_ids,
-            candidate=c,
-            candidate_af=candidate_af,
-            candidate_genres=candidate_genres,
-        )
-        
-        c["score"] = score_result["final_score"]
-        c["score_components"] = score_result["components"]
-        
-        scored_results.append(c)
-    
-    # Sort by final score
-    scored_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
-    # =========================================
-    # 5) DIVERSITY CAPS + RETURN
-    # =========================================
-    
-    final_results = apply_diversity_caps(scored_results, max_per_artist=2, max_from_seed_album=2)
-    final_results = final_results[:limit]
-    
-    # Clean up output
-    for r in final_results:
-        # Remove internal fields
-        r.pop("artist_ids", None)
-        r.pop("source", None)
-        r.pop("genres", None)
-    
-    return {
-        "seed": {
-            "id": track_id,
-            "name": seed_name,
-            "artists": [a.get("name", "") for a in seed_artists],
-            "album": seed_album.get("name"),
-            "year": seed_year,
-            "genres": seed_genres[:5],
-            "url": (seed.get("external_urls", {}) or {}).get("spotify"),
-        },
-        "weights": WEIGHTS,
-        "count": len(final_results),
-        "results": final_results,
-        "debug": {
-            "candidates_found": len(candidates),
-            "candidates_scored": len(scored_results),
-            "seed_audio_features": bool(seed_af),
-            "related_artists_found": len(related_artist_ids),
-        }
-    }
-
-"""
-Add this endpoint to your main.py
-
-/spotify/vibe_v3 - works without audio-features or related-artists APIs
-"""
-
-# Add this import at the top of main.py:
-# from .vibe_v3 import (
-#     compute_composite_score_v3,
-#     build_search_queries_v3,
-#     parse_year,
-#     WEIGHTS_V3,
-# )
-
-
-@app.get("/spotify/vibe_v3")
-def spotify_vibe_v3(request: Request, track_id: str, limit: int = 20):
-    """
-    "More like this" recommendations using only non-restricted Spotify APIs.
-    
-    Works with:
-    - Genre overlap (artist metadata)
-    - Era/year proximity (album metadata)
-    - Playlist co-occurrence (search API)
-    - Popularity signals
-    
-    Does NOT require:
-    - audio-features API (restricted)
-    - related-artists API (may be restricted)
-    - recommendations API (deprecated)
-    """
-    
-    # =========================================
-    # 1) FETCH SEED TRACK METADATA
-    # =========================================
-    
-    seed, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
-    if err:
-        return {"error": "Could not fetch seed track", "details": err}
-    
-    seed_name = seed.get("name", "")
-    seed_artists = seed.get("artists", []) or []
-    seed_artist_ids = set(a.get("id") for a in seed_artists if a.get("id"))
-    seed_artist_name = seed_artists[0].get("name", "") if seed_artists else ""
-    seed_album = seed.get("album", {}) or {}
-    seed_album_id = seed_album.get("id")
-    seed_year = parse_year(seed_album.get("release_date"))
-    
-    # Fetch genres from seed artist(s)
-    seed_genres = []
-    if seed_artist_ids:
-        artist_ids_str = ",".join(list(seed_artist_ids)[:5])
-        artists_data, err = spotify_get_json(request, "/artists", params={"ids": artist_ids_str})
-        if not err:
-            for a in artists_data.get("artists", []) or []:
-                seed_genres.extend(a.get("genres", []))
-    seed_genres = list(dict.fromkeys(seed_genres))[:10]  # dedupe, cap
-    
-    # =========================================
-    # 2) BUILD CANDIDATE POOL
-    # =========================================
-    
-    candidates: list[dict] = []
-    
-    # 2a) Seed album tracks
-    if seed_album_id:
-        album_tracks, err = spotify_get_json(
-            request,
-            f"/albums/{seed_album_id}/tracks",
-            params={"limit": 20, "market": "US"}
-        )
-        if not err:
-            for t in (album_tracks.get("items", []) or []):
-                tid = t.get("id")
-                if not tid or tid == track_id:
-                    continue
-                candidates.append({
-                    "id": tid,
-                    "name": t.get("name", ""),
-                    "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                    "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                    "source": "seed_album",
-                })
-    
-    # 2b) Search-based candidates (playlists and tracks)
-    search_queries = build_search_queries_v3(seed_name, seed_artist_name, seed_genres, seed_year)
-    
-    for sq in search_queries:
-        query = sq["query"]
-        source = sq["source"]
-        search_type = sq["type"]
-        
-        if search_type == "playlist":
-            # Search for playlists, then get their tracks
-            q = query if "playlist" in query.lower() else f"{query} playlist"
-            
-            pdata, err = spotify_get_json(
-                request,
-                "/search",
-                params={"q": q, "type": "playlist", "limit": 2, "market": "US"}
-            )
-            if err:
-                continue
-            
-            for playlist in (pdata.get("playlists", {}).get("items", []) or [])[:2]:
-                if not playlist:
-                    continue
-                pid = playlist.get("id")
-                if not pid:
-                    continue
-                
-                # Get tracks from this playlist
-                tracks_data, err = spotify_get_json(
-                    request,
-                    f"/playlists/{pid}/tracks",
-                    params={"limit": 10, "market": "US"}
-                )
-                if err:
-                    continue
-                
-                for item in (tracks_data.get("items", []) or []):
-                    t = (item or {}).get("track")
-                    if not t or not t.get("id") or t["id"] == track_id:
-                        continue
-                    
-                    candidates.append({
-                        "id": t["id"],
-                        "name": t.get("name", ""),
-                        "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                        "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                        "album": (t.get("album", {}) or {}).get("name", ""),
-                        "release_date": (t.get("album", {}) or {}).get("release_date"),
-                        "popularity": t.get("popularity", 0),
-                        "image": ((t.get("album", {}) or {}).get("images") or [{}])[0].get("url"),
-                        "url": (t.get("external_urls", {}) or {}).get("spotify"),
-                        "source": source,
-                    })
-        
-        elif search_type == "track":
-            # Direct track search
-            tdata, err = spotify_get_json(
-                request,
-                "/search",
-                params={"q": query, "type": "track", "limit": 15, "market": "US"}
-            )
-            if err:
-                continue
-            
-            for t in (tdata.get("tracks", {}).get("items", []) or []):
-                if not t or not t.get("id") or t["id"] == track_id:
-                    continue
-                
-                candidates.append({
-                    "id": t["id"],
-                    "name": t.get("name", ""),
-                    "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                    "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                    "album": (t.get("album", {}) or {}).get("name", ""),
-                    "release_date": (t.get("album", {}) or {}).get("release_date"),
-                    "popularity": t.get("popularity", 0),
-                    "image": ((t.get("album", {}) or {}).get("images") or [{}])[0].get("url"),
-                    "url": (t.get("external_urls", {}) or {}).get("spotify"),
-                    "source": source,
-                })
-    
-    # Deduplicate
-    candidates = dedupe_tracks(candidates)
-    candidates = [c for c in candidates if c.get("id") != track_id]
-    
-    if not candidates:
-        return {
-            "seed": {"id": track_id, "name": seed_name, "artists": [a.get("name") for a in seed_artists]},
-            "count": 0,
-            "results": [],
-            "debug": {"error": "No candidates found"}
-        }
-    
-    # =========================================
-    # 3) HYDRATE CANDIDATES (fill in missing metadata)
-    # =========================================
-    
-    # Find candidates that need hydration
-    needs_hydration = [c for c in candidates if not c.get("release_date") or not c.get("url")]
-    hydrate_ids = [c["id"] for c in needs_hydration[:50]]
-    
-    if hydrate_ids:
-        ids_str = ",".join(hydrate_ids)
-        tracks_data, err = spotify_get_json(request, "/tracks", params={"ids": ids_str, "market": "US"})
-        if not err:
-            tracks_by_id = {t["id"]: t for t in (tracks_data.get("tracks", []) or []) if t and t.get("id")}
-            
-            for c in candidates:
-                if c["id"] in tracks_by_id:
-                    t = tracks_by_id[c["id"]]
-                    album = t.get("album", {}) or {}
-                    c.update({
-                        "name": t.get("name", c.get("name", "")),
-                        "album": album.get("name", c.get("album", "")),
-                        "release_date": album.get("release_date", c.get("release_date")),
-                        "popularity": t.get("popularity", c.get("popularity", 0)),
-                        "image": (album.get("images") or [{}])[0].get("url", c.get("image")),
-                        "url": (t.get("external_urls", {}) or {}).get("spotify", c.get("url")),
-                    })
-    
-    # Fetch genres for all candidate artists
-    all_artist_ids = set()
-    for c in candidates:
-        all_artist_ids.update(c.get("artist_ids", []))
-    
-    genres_by_artist = {}
-    artist_id_list = list(all_artist_ids)
-    for i in range(0, len(artist_id_list), 50):
-        batch = artist_id_list[i:i+50]
-        ids_str = ",".join(batch)
-        artists_data, err = spotify_get_json(request, "/artists", params={"ids": ids_str})
-        if not err:
-            for a in (artists_data.get("artists", []) or []):
-                if a and a.get("id"):
-                    genres_by_artist[a["id"]] = a.get("genres", [])
-    
-    # =========================================
-    # 4) FILTER + SCORE
-    # =========================================
-    
-    scored_results = []
-    
-    for c in candidates:
-        # Build candidate genres
-        candidate_genres = []
-        for aid in c.get("artist_ids", []):
-            candidate_genres.extend(genres_by_artist.get(aid, []))
-        candidate_genres = list(dict.fromkeys(candidate_genres))
-        
-        # Filter junk
-        filter_obj = {
-            "name": c.get("name", ""),
-            "album": c.get("album", ""),
-            "artists": c.get("artists", []),
-        }
-        if looks_like_cover(filter_obj):
-            continue
-        if looks_like_seasonal(filter_obj):
-            continue
-        
-        # Score
-        score_result = compute_composite_score_v3(
-            seed_name=seed_name,
-            seed_genres=seed_genres,
-            seed_year=seed_year,
-            seed_artist_ids=seed_artist_ids,
-            candidate=c,
-            candidate_genres=candidate_genres,
-        )
-        
-        c["score"] = score_result["final_score"]
-        c["score_components"] = score_result["components"]
-        
-        scored_results.append(c)
-    
-    # Sort by score
-    scored_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
-    # =========================================
-    # 5) DIVERSITY CAPS + CLEAN OUTPUT
-    # =========================================
-    
-    final_results = apply_diversity_caps(scored_results, max_per_artist=2, max_from_seed_album=2)
-    final_results = final_results[:limit]
-    
-    # Clean up internal fields
-    for r in final_results:
-        r.pop("artist_ids", None)
-        r.pop("source", None)
-    
-    return {
-        "seed": {
-            "id": track_id,
-            "name": seed_name,
-            "artists": [a.get("name", "") for a in seed_artists],
-            "album": seed_album.get("name"),
-            "year": seed_year,
-            "genres": seed_genres[:5],
-            "url": (seed.get("external_urls", {}) or {}).get("spotify"),
-        },
-        "weights": WEIGHTS_V3,
-        "count": len(final_results),
-        "results": final_results,
-        "debug": {
-            "candidates_found": len(candidates),
-            "candidates_scored": len(scored_results),
-            "queries_used": len(search_queries),
-        }
-    }
-
-@app.get("/spotify/vibe_v4")
-def spotify_vibe_v4(request: Request, track_id: str, limit: int = 20):
-    """
-    Playlist co-occurrence based recommendations.
-    
-    Logic: If humans put songs together in playlists, they probably vibe similarly.
-    Songs appearing in multiple playlists with the seed = higher confidence.
-    """
-    
-    # =========================================
-    # 1) FETCH SEED TRACK METADATA
-    # =========================================
-    
-    seed, err = spotify_get_json(request, f"/tracks/{track_id}", params={"market": "US"})
-    if err:
-        return {"error": "Could not fetch seed track", "details": err}
-    
-    seed_name = seed.get("name", "")
-    seed_artists = seed.get("artists", []) or []
-    seed_artist_ids = set(a.get("id") for a in seed_artists if a.get("id"))
-    seed_artist_name = seed_artists[0].get("name", "") if seed_artists else ""
-    seed_album = seed.get("album", {}) or {}
-    seed_year = parse_year(seed_album.get("release_date"))
-    
-    # Fetch genres from seed artist(s)
-    seed_genres = []
-    if seed_artist_ids:
-        artist_ids_str = ",".join(list(seed_artist_ids)[:5])
-        artists_data, err = spotify_get_json(request, "/artists", params={"ids": artist_ids_str})
-        if not err:
-            for a in artists_data.get("artists", []) or []:
-                seed_genres.extend(a.get("genres", []))
-    seed_genres = list(dict.fromkeys(seed_genres))[:10]
-    
-    # =========================================
-    # 2) FIND PLAYLISTS & TRACK CO-OCCURRENCE
-    # =========================================
-    
-    # Track how many playlists each candidate appears in
-    candidate_playlist_count: dict[str, int] = defaultdict(int)
-    candidate_data: dict[str, dict] = {}  # store track metadata
-    playlists_searched = 0
-    playlists_with_seed = 0
-    
-    # Build search queries
-    queries = build_playlist_queries_v4(seed_name, seed_artist_name)
-    
-    for query in queries:
-        # Search for playlists
-        pdata, err = spotify_get_json(
-            request,
-            "/search",
-            params={"q": query, "type": "playlist", "limit": 5, "market": "US"}
-        )
-        if err:
-            continue
-        
-        playlists = pdata.get("playlists", {}).get("items", []) or []
-        
-        for playlist in playlists:
-            if not playlist:
-                continue
-            
-            pid = playlist.get("id")
-            if not pid:
-                continue
-            
-            playlists_searched += 1
-            
-            # Get tracks from this playlist
-            tracks_data, err = spotify_get_json(
-                request,
-                f"/playlists/{pid}/tracks",
-                params={"limit": 50, "market": "US"}  # get more tracks per playlist
-            )
-            if err:
-                continue
-            
-            items = tracks_data.get("items", []) or []
-            
-            # Check if seed track is in this playlist
-            playlist_track_ids = set()
-            for item in items:
-                t = (item or {}).get("track")
-                if t and t.get("id"):
-                    playlist_track_ids.add(t["id"])
-            
-            seed_in_playlist = track_id in playlist_track_ids
-            if seed_in_playlist:
-                playlists_with_seed += 1
-            
-            # Add all tracks as candidates (with co-occurrence boost if seed is present)
-            for item in items:
-                t = (item or {}).get("track")
-                if not t or not t.get("id"):
-                    continue
-                
-                tid = t["id"]
-                if tid == track_id:
-                    continue  # skip seed itself
-                
-                # Count co-occurrence (stronger signal if seed is in same playlist)
-                if seed_in_playlist:
-                    candidate_playlist_count[tid] += 2  # double weight
-                else:
-                    candidate_playlist_count[tid] += 1
-                
-                # Store track data (keep first occurrence's data)
-                if tid not in candidate_data:
-                    album = t.get("album", {}) or {}
-                    candidate_data[tid] = {
-                        "id": tid,
-                        "name": t.get("name", ""),
-                        "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
-                        "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
-                        "album": album.get("name", ""),
-                        "release_date": album.get("release_date"),
-                        "popularity": t.get("popularity", 0),
-                        "image": (album.get("images") or [{}])[0].get("url"),
-                        "url": (t.get("external_urls", {}) or {}).get("spotify"),
-                    }
-    
-    if not candidate_data:
-        return {
-            "seed": {"id": track_id, "name": seed_name, "artists": [a.get("name") for a in seed_artists]},
-            "count": 0,
-            "results": [],
-            "debug": {"error": "No candidates found in playlists"}
-        }
-    
-    # =========================================
-    # 3) FETCH GENRES FOR CANDIDATES
-    # =========================================
-    
-    all_artist_ids = set()
-    for c in candidate_data.values():
-        all_artist_ids.update(c.get("artist_ids", []))
-    
-    genres_by_artist = {}
-    artist_id_list = list(all_artist_ids)
-    for i in range(0, len(artist_id_list), 50):
-        batch = artist_id_list[i:i+50]
-        ids_str = ",".join(batch)
-        artists_data, err = spotify_get_json(request, "/artists", params={"ids": ids_str})
-        if not err:
-            for a in (artists_data.get("artists", []) or []):
-                if a and a.get("id"):
-                    genres_by_artist[a["id"]] = a.get("genres", [])
-    
-    # =========================================
-    # 4) SCORE CANDIDATES
-    # =========================================
-    
-    max_cooccurrence = max(candidate_playlist_count.values()) if candidate_playlist_count else 1
-    scored_results = []
-    
-    for tid, c in candidate_data.items():
-        # Build candidate genres
-        candidate_genres = []
-        for aid in c.get("artist_ids", []):
-            candidate_genres.extend(genres_by_artist.get(aid, []))
-        candidate_genres = list(dict.fromkeys(candidate_genres))
-        
-        # Filter junk
-        filter_obj = {
-            "name": c.get("name", ""),
-            "album": c.get("album", ""),
-            "artists": c.get("artists", []),
-        }
-        if looks_like_cover(filter_obj):
-            continue
-        if looks_like_seasonal(filter_obj):
-            continue
-        
-        # Get co-occurrence count
-        cooccur_count = candidate_playlist_count.get(tid, 0)
-        
-        # Score
-        score_result = compute_composite_score_v4(
-            seed_name=seed_name,
-            seed_genres=seed_genres,
-            seed_year=seed_year,
-            seed_artist_ids=seed_artist_ids,
-            candidate=c,
-            candidate_genres=candidate_genres,
-            cooccurrence_count=cooccur_count,
-            max_cooccurrence=max_cooccurrence,
-        )
-        
-        c["score"] = score_result["final_score"]
-        c["score_components"] = score_result["components"]
-        
-        scored_results.append(c)
-    
-    # Sort by score
-    scored_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-    
-    # =========================================
-    # 5) DIVERSITY CAPS + OUTPUT
-    # =========================================
-    
-    final_results = apply_diversity_caps(scored_results, max_per_artist=2, max_from_seed_album=2)
-    final_results = final_results[:limit]
-    
-    # Clean up
-    for r in final_results:
-        r.pop("artist_ids", None)
-    
-    return {
-        "seed": {
-            "id": track_id,
-            "name": seed_name,
-            "artists": [a.get("name", "") for a in seed_artists],
-            "album": seed_album.get("name"),
-            "year": seed_year,
-            "genres": seed_genres[:5],
-            "url": (seed.get("external_urls", {}) or {}).get("spotify"),
-        },
-        "weights": WEIGHTS_V4,
-        "count": len(final_results),
-        "results": final_results,
-        "debug": {
-            "playlists_searched": playlists_searched,
-            "playlists_with_seed": playlists_with_seed,
-            "unique_candidates": len(candidate_data),
-            "candidates_scored": len(scored_results),
-            "max_cooccurrence": max_cooccurrence,
-        }
-    }
 
 # ============================================================
 # GENIUS API HELPERS (add these before the endpoint)
@@ -1963,11 +1080,11 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
     
     queries = build_playlist_queries_v5(seed_name, seed_artist_name)
     
-    for query in queries:
+    for query in queries[:4]:
         pdata, err = spotify_get_json(
             request,
             "/search",
-            params={"q": query, "type": "playlist", "limit": 5, "market": "US"}
+            params={"q": query, "type": "playlist", "limit": 3, "market": "US"}
         )
         if err:
             continue
@@ -2073,12 +1190,12 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
     max_cooccurrence = max(candidate_playlist_count.values()) if candidate_playlist_count else 1
     scored_results = []
     lyrics_fetched = 0
-    max_lyrics_fetch = 30  # limit API calls
+    max_lyrics_fetch = 8  # limit API calls
     
     # Cache for lyrics analysis
     lyrics_cache: dict[str, dict] = {}
     
-    for tid, c in sorted_candidates[:100]:  # limit to top 100 candidates
+    for tid, c in sorted_candidates[:30]:  # limit to top 30 candidates for optimization
         # Build candidate genres
         candidate_genres = []
         for aid in c.get("artist_ids", []):
