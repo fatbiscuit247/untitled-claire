@@ -5,7 +5,6 @@ import uuid
 import os
 import json
 import numpy as np
-import librosa
 from pathlib import Path
 import base64
 import hashlib
@@ -20,6 +19,9 @@ from collections import defaultdict
 from collections import Counter
 from typing import List, Optional 
 import re
+from fastapi.staticfiles import StaticFiles
+
+
 
 
 
@@ -30,7 +32,10 @@ from .vibe_v5 import (
     build_playlist_queries_v5,
     parse_year,
     analyze_lyrics,
+    analyze_album_art,
     WEIGHTS_V5,
+    lastfm_get_artist_tags,
+    lastfm_get_similar_artists,
 )
 #lyrics caching flow to hopefully optimize search
 from .lyrics_cache import get_cached_lyrics, cache_lyrics, get_cache_stats
@@ -64,7 +69,7 @@ def spotify_get(request: Request, url: str, params: dict | None = None):
 
     r = requests.get(url, headers=headers, params=params, timeout=20)
 
-    # If token expired, you’ll see 401 — we’ll add refresh later
+    # If token expired, you'll see 401 — we'll add refresh later
     if r.status_code != 200:
         return None, {"error": "Spotify API error", "status": r.status_code, "body": r.text}
 
@@ -169,7 +174,7 @@ def normalize_for_filtering(candidate: dict) -> dict:
 
 def add_playlist_tracks_as_candidates(request: Request, query: str, candidates: list, max_playlists: int = 1, per_playlist: int = 8):
 
-    # make sure we don’t double-append "playlist"
+    # make sure we don't double-append "playlist"
     q = query
     if "playlist" not in q.lower():
         q = f"{q} playlist"
@@ -281,6 +286,8 @@ def make_code_challenge(verifier: str) -> str:
 
 app = FastAPI(title="Vibe Finder")
 
+app.mount("/static", StaticFiles(directory="static"), name="static") # for clouds
+
 @app.get("/routes")
 def routes():
     return [r.path for r in app.routes]
@@ -298,6 +305,7 @@ def home():
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Vibe Finder</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/color-thief/2.3.0/color-thief.umd.js"></script>
     <style>
         * {
             box-sizing: border-box;
@@ -305,321 +313,602 @@ def home():
             padding: 0;
         }
         
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-            min-height: 100vh;
-            color: #fff;
-            padding: 40px 20px;
+        :root {
+            --color-1: #1a1a2e;
+            --color-2: #16213e;
+            --color-3: #0f3460;
+            --color-4: #533483;
+            --color-5: #2c3e50;
+            --cloud-tint: rgba(255, 255, 255, 0.9);
+            --rain-intensity: 0;
+            --sun-intensity: 0;
+            --mist-intensity: 0;
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --glass-border: rgba(255, 255, 255, 0.15);
+            --text-primary: rgba(255, 255, 255, 0.95);
+            --text-secondary: rgba(255, 255, 255, 0.6);
         }
         
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            min-height: 100vh;
+            color: var(--text-primary);
+            overflow-x: hidden;
+        }
+        
+        /* ============== SKY GRADIENT (Album Colors) ============== */
+        .sky {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -10;
+            background: linear-gradient(
+                180deg,
+                var(--color-1) 0%,
+                var(--color-2) 30%,
+                var(--color-3) 60%,
+                var(--color-4) 100%
+            );
+            transition: all 2s ease;
+        }
+        
+    
+        /* ============== TOP SKY CLOUD LAYER ============== */
+        .clouds-container{
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 55vh;        /* Only top portion */
+        overflow: hidden;
+        pointer-events: none;
+        z-index: -8;
+        }
+
+        /* Base cloud style */
+        .cloud{
+            position: absolute;position: absolute;
+            background-repeat: no-repeat;
+            background-size: contain;
+            background-position: center;
+            will-change: transform;
+            filter: blur(0.4px);
+        }
+
+
+
+       /* subtle movement (not drifting across the whole screen) */
+        @keyframes floaty {
+        0%, 100% { transform: translateY(0) translateX(0); }
+        50%      { transform: translateY(10px) translateX(12px); }
+        }
+        @keyframes floaty2 {
+        0%, 100% { transform: translateY(0) translateX(0); }
+        50%      { transform: translateY(12px) translateX(-10px); }
+        }
+
+        /* LEFT cloud */
+        .cloud-1{
+        top: -120px;
+        left: -180px;
+        width: 1300px;
+        height: 650px;
+        background-image: url('/static/clouds/cloud1.png');
+        opacity: 0.65;
+        animation: floaty 22s ease-in-out infinite;
+        }
+
+        /* MID-LEFT cloud */
+        .cloud-2{
+        top: -160px;
+        left: 18vw;
+        width: 1200px;
+        height: 600px;
+        background-image: url('/static/clouds/cloud2.png');
+        opacity: 0.92;
+        animation: floaty2 26s ease-in-out infinite;
+        }
+
+        /* MID-RIGHT cloud */
+        .cloud-3{
+        top: -200px;
+        left: 52vw;
+        width: 1250px;
+        height: 620px;
+        background-image: url('/static/clouds/cloud1.png');
+        opacity: 0.60;
+        animation: floaty 30s ease-in-out infinite;
+        }
+
+        /* RIGHT cloud */
+        .cloud-4{
+        top: -120px;
+        right: -260px;
+        width: 1400px;
+        height: 700px;
+        background-image: url('/static/clouds/cloud2.png');
+        opacity: 0.90;
+        animation: floaty2 28s ease-in-out infinite;
+        }
+
+        /* SMALL filler puff (optional, helps “bridge” gaps) */
+        .cloud-5{
+        top: 40px;
+        left: 40vw;
+        width: 700px;
+        height: 350px;
+        background-image: url('/static/clouds/cloud2.png');
+        opacity: 0.80;
+        animation: floaty 34s ease-in-out infinite;
+        }
+
+        .cloud-6{
+            top: -8px;
+            left: 6%;
+            width: 900px;
+            height: 420px;
+            opacity: 0.50;
+            background-image: url('/static/clouds/cloud1.png'); /* <-- change to your new image file */
+            animation: floaty 34s ease-in-out infinite;
+        }
+
+        .cloud-7{
+            top: -8px;
+            left: -190%;
+            width: 900px;
+            height: 420px;
+            opacity: 0.50;
+            background-image: url('/static/clouds/cloud4.png'); /* <-- change to your new image file */
+            animation: floaty 34s ease-in-out infinite;
+        }
+
+        
+
+
+
+
+
+
+        
+        /* ============== RAIN ============== */
+        .rain-container {
+            position: fixed;
+            top: 12vh;
+            left: 0;
+            width: 100%;
+            height: 62vh;
+            z-index: -7;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 1.5s ease;
+            overflow: hidden;
+        }
+
+        .rain-container.active {
+            opacity: var(--rain-intensity, 0.5);
+        }
+
+        .rain-drop {
+            position: absolute;
+            width: 2px;
+            height: 20px;
+            background: linear-gradient(transparent, rgba(200, 220, 255, 0.7));
+            border-radius: 2px;
+            transform: rotate(12deg);
+            animation: rainFall linear infinite;
+        }
+
+        @keyframes rainFall {
+            0% { transform: translateY(-5px) rotate(12deg); }
+            100% { transform: translateY(62vh) rotate(12deg); }
+        }
+
+        /* ============== SUN RAYS ============== */
+      
+        .sun-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -7;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 1.5s ease;
+            background: radial-gradient(
+                circle at 85% 12%,
+                rgba(255, 255, 240, 0.95) 0%,
+                rgba(255, 250, 220, 0.7) 2%,
+                rgba(255, 245, 180, 0.4) 5%,
+                rgba(255, 240, 150, 0.2) 10%,
+                rgba(255, 230, 120, 0.1) 15%,
+                transparent 25%
+            );
+        }
+
+        .sun-container.active {
+            opacity: var(--sun-intensity, 0.8);
+        }
+
+        .sun, .sun-rays {
+            display: none;
+        }
+       
+        /* ============== MIST/FOG ============== */
+        .mist-container {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 50%;
+            z-index: -6;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 2s ease;
+        }
+
+        .mist-container.active {
+            opacity: 1;
+        }
+
+        .mist-layer {
+            position: absolute;
+            bottom: 0;
+            left: -50%;
+            width: 200%;
+            height: 100%;
+            background: linear-gradient(0deg, 
+                rgba(255, 255, 255, 0.4) 0%,
+                rgba(255, 255, 255, 0.2) 30%,
+                rgba(255, 255, 255, 0.05) 60%,
+                transparent 100%
+            );
+            animation: mistDrift 60s ease-in-out infinite;
+        }
+
+        .mist-layer:nth-child(2) {
+            animation-delay: -25s;
+            animation-duration: 45s;
+            opacity: 0.7;
+            height: 70%;
+        }
+        
+        @keyframes mistDrift {
+            0%, 100% { transform: translateX(-25%); }
+            50% { transform: translateX(0%); }
+        }
+        
+        /* ============== STARS ============== */
+        .stars-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -5;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 2s ease;
+        }
+        
+        .stars-container.active {
+            opacity: 0.8;
+        }
+        
+        .star {
+            position: absolute;
+            width: 2px;
+            height: 2px;
+            background: white;
+            border-radius: 50%;
+            animation: twinkle 4s ease-in-out infinite;
+        }
+        
+        @keyframes twinkle {
+            0%, 100% { opacity: 0.2; transform: scale(1); }
+            50% { opacity: 1; transform: scale(1.3); }
+        }
+        
+        /* ============== CONTENT ============== */
         .container {
             max-width: 800px;
             margin: 0 auto;
+            padding: 40px 20px;
+            position: relative;
+            z-index: 1;
+        }
+        
+        .glass {
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
         }
         
         h1 {
             text-align: center;
-            font-size: 2.5rem;
+            font-size: 3rem;
+            font-weight: 300;
+            letter-spacing: 0.1em;
             margin-bottom: 8px;
-            background: linear-gradient(90deg, #1DB954, #1ed760);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 40px rgba(255, 255, 255, 0.3);
         }
         
         .subtitle {
             text-align: center;
-            color: #888;
-            margin-bottom: 30px;
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            font-weight: 300;
+            letter-spacing: 0.05em;
+            margin-bottom: 40px;
         }
         
         .search-box {
             display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
+            gap: 12px;
+            margin-bottom: 30px;
         }
         
         .search-box input {
             flex: 1;
-            padding: 14px 18px;
+            padding: 18px 24px;
             font-size: 16px;
             border: none;
-            border-radius: 8px;
-            background: rgba(255,255,255,0.1);
-            color: #fff;
+            border-radius: 16px;
+            background: var(--glass-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--glass-border);
+            color: var(--text-primary);
             outline: none;
+            transition: all 0.3s ease;
+            font-weight: 300;
         }
         
-        .search-box input::placeholder {
-            color: #888;
-        }
+        .search-box input::placeholder { color: var(--text-secondary); }
         
         .search-box input:focus {
-            background: rgba(255,255,255,0.15);
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.3);
         }
         
         .search-box button {
-            padding: 14px 28px;
+            padding: 18px 32px;
             font-size: 16px;
             border: none;
-            border-radius: 8px;
-            background: #1DB954;
-            color: #fff;
+            border-radius: 16px;
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(20px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: var(--text-primary);
             cursor: pointer;
-            font-weight: 600;
-            transition: background 0.2s;
+            font-weight: 400;
+            letter-spacing: 0.05em;
+            transition: all 0.3s ease;
         }
         
         .search-box button:hover {
-            background: #1ed760;
+            background: rgba(255, 255, 255, 0.25);
+            transform: translateY(-2px);
         }
         
         .section-title {
-            font-size: 1.2rem;
-            margin: 30px 0 15px 0;
-            color: #ccc;
+            font-size: 0.9rem;
+            font-weight: 400;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            margin: 40px 0 20px 0;
+            color: var(--text-secondary);
         }
         
         .results-grid {
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 12px;
         }
         
         .track-card {
             display: flex;
             align-items: center;
-            gap: 15px;
-            padding: 12px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 8px;
+            gap: 16px;
+            padding: 16px;
             cursor: pointer;
-            transition: background 0.2s;
+            transition: all 0.3s ease;
+            border-radius: 12px;
         }
         
         .track-card:hover {
-            background: rgba(255,255,255,0.1);
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateX(5px);
         }
         
-        .track-card.selected {
-            background: rgba(29, 185, 84, 0.2);
-            border: 1px solid #1DB954;
-        }
+        .track-card.selected { background: rgba(255, 255, 255, 0.15); }
         
         .track-card img {
-            width: 56px;
-            height: 56px;
-            border-radius: 4px;
+            width: 60px;
+            height: 60px;
+            border-radius: 10px;
             object-fit: cover;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
         }
         
-        .track-info {
-            flex: 1;
+        .track-info { flex: 1; }
+        .track-name { font-weight: 500; font-size: 1.05rem; margin-bottom: 4px; }
+        .track-artist { color: var(--text-secondary); font-size: 0.9rem; font-weight: 300; }
+        .track-meta { font-size: 0.8rem; color: var(--text-secondary); }
+        
+        .seed-info {
+            padding: 24px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
         }
         
-        .track-name {
-            font-weight: 600;
-            margin-bottom: 4px;
+        .seed-info img {
+            width: 100px;
+            height: 100px;
+            border-radius: 12px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
         }
         
-        .track-artist {
-            color: #888;
-            font-size: 14px;
-        }
+        .seed-details h3 { font-size: 1.3rem; font-weight: 500; margin-bottom: 6px; }
+        .seed-details p { color: var(--text-secondary); font-size: 0.95rem; margin-bottom: 12px; }
         
-        .track-meta {
-            text-align: right;
-            font-size: 12px;
-            color: #666;
+        .rec-themes { display: flex; gap: 8px; flex-wrap: wrap; }
+        
+        .theme-tag {
+            padding: 5px 12px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 20px;
+            font-size: 0.75rem;
         }
         
         .recommendation-card {
             display: flex;
             align-items: center;
-            gap: 15px;
-            padding: 12px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 8px;
-            transition: background 0.2s;
+            gap: 16px;
+            padding: 16px;
+            transition: all 0.3s ease;
+            border-radius: 12px;
         }
         
         .recommendation-card:hover {
-            background: rgba(255,255,255,0.1);
+            background: rgba(255, 255, 255, 0.08);
+            transform: translateX(5px);
         }
         
         .recommendation-card img {
-            width: 64px;
-            height: 64px;
-            border-radius: 4px;
+            width: 70px;
+            height: 70px;
+            border-radius: 10px;
             object-fit: cover;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
         }
         
-        .rec-info {
-            flex: 1;
-        }
+        .rec-info { flex: 1; }
+        .rec-name { font-weight: 500; font-size: 1.05rem; margin-bottom: 4px; }
+        .rec-name a { color: var(--text-primary); text-decoration: none; }
+        .rec-name a:hover { text-shadow: 0 0 20px rgba(255, 255, 255, 0.5); }
+        .rec-artist { color: var(--text-secondary); font-size: 0.9rem; margin-bottom: 8px; }
         
-        .rec-name {
-            font-weight: 600;
-            margin-bottom: 4px;
-        }
+        .rec-score { text-align: center; min-width: 70px; }
+        .score-value { font-size: 1.8rem; font-weight: 300; text-shadow: 0 0 20px rgba(255, 255, 255, 0.3); }
+        .score-label { font-size: 0.7rem; color: var(--text-secondary); letter-spacing: 0.1em; text-transform: uppercase; }
         
-        .rec-name a {
-            color: #fff;
-            text-decoration: none;
-        }
-        
-        .rec-name a:hover {
-            text-decoration: underline;
-        }
-        
-        .rec-artist {
-            color: #888;
-            font-size: 14px;
-            margin-bottom: 6px;
-        }
-        
-        .rec-themes {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-        }
-        
-        .theme-tag {
-            padding: 3px 8px;
-            background: rgba(29, 185, 84, 0.2);
-            color: #1DB954;
-            border-radius: 12px;
-            font-size: 11px;
-        }
-        
-        .rec-score {
-            text-align: right;
-            min-width: 60px;
-        }
-        
-        .score-value {
-            font-size: 1.4rem;
-            font-weight: 700;
-            color: #1DB954;
-        }
-        
-        .score-label {
-            font-size: 11px;
-            color: #666;
-        }
-        
-        .seed-info {
-            background: rgba(29, 185, 84, 0.1);
-            border: 1px solid rgba(29, 185, 84, 0.3);
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 20px;
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-        
-        .seed-info img {
-            width: 80px;
-            height: 80px;
-            border-radius: 4px;
-        }
-        
-        .seed-details h3 {
-            margin-bottom: 4px;
-        }
-        
-        .seed-details p {
-            color: #888;
-            font-size: 14px;
-            margin-bottom: 8px;
-        }
-        
-        .loading {
-            text-align: center;
-            padding: 40px;
-            color: #888;
-        }
+        .loading { text-align: center; padding: 50px; color: var(--text-secondary); }
         
         .spinner {
             display: inline-block;
-            width: 30px;
-            height: 30px;
-            border: 3px solid rgba(255,255,255,0.1);
-            border-top-color: #1DB954;
+            width: 40px;
+            height: 40px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-top-color: rgba(255, 255, 255, 0.6);
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
         
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
+        @keyframes spin { to { transform: rotate(360deg); } }
         
         .error {
             background: rgba(255, 100, 100, 0.1);
-            border: 1px solid rgba(255, 100, 100, 0.3);
-            padding: 15px;
-            border-radius: 8px;
-            color: #ff6b6b;
+            border: 1px solid rgba(255, 100, 100, 0.2);
+            padding: 20px;
+            border-radius: 16px;
+            color: rgba(255, 150, 150, 0.9);
         }
         
-        .login-prompt {
-            text-align: center;
-            padding: 40px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 8px;
-        }
+        .login-prompt { text-align: center; padding: 50px; }
         
         .login-prompt a {
             display: inline-block;
-            margin-top: 15px;
-            padding: 12px 24px;
-            background: #1DB954;
-            color: #fff;
+            padding: 16px 32px;
+            background: rgba(255, 255, 255, 0.15);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: var(--text-primary);
             text-decoration: none;
-            border-radius: 24px;
-            font-weight: 600;
+            border-radius: 30px;
+            margin-top: 15px;
+            transition: all 0.3s ease;
         }
         
-        .login-prompt a:hover {
-            background: #1ed760;
-        }
+        .login-prompt a:hover { background: rgba(255, 255, 255, 0.25); }
         
-        #search-results, #recommendations {
-            display: none;
-        }
+        #search-results, #recommendations { display: none; }
     </style>
 </head>
 <body>
+    <!-- Sky gradient -->
+    <div class="sky"></div>
+    
+    <!-- Clouds -->
+    <div class="clouds-container">
+        <div class="cloud cloud-1"></div>
+        <div class="cloud cloud-2"></div>
+        <div class="cloud cloud-3"></div>
+        <div class="cloud cloud-4"></div>
+        <div class="cloud cloud-5"></div>
+        <div class="cloud cloud-6"></div>
+        <div class="cloud cloud-7"></div>
+
+    </div>
+    
+    <!-- Stars -->
+    <div class="stars-container" id="stars-container"></div>
+    
+    <!-- Rain -->
+    <div class="rain-container" id="rain-container"></div>
+    
+    <!-- Sun -->
+    <div class="sun-container" id="sun-container"></div>
+    
+    <!-- Mist -->
+    <div class="mist-container" id="mist-container">
+        <div class="mist-layer"></div>
+        <div class="mist-layer"></div>
+    </div>
+    
+    <!-- Content -->
     <div class="container">
         <h1>Vibe Finder</h1>
-        <p class="subtitle">Find songs that match your vibe</p>
+        <p class="subtitle">discover your sound</p>
+
+        <div style="text-align: center; margin-bottom: 20px;">
+            <button onclick="testWeather('rain')" style="margin: 5px; padding: 8px 16px;">Test Rain</button>
+            <button onclick="testWeather('stars')" style="margin: 5px; padding: 8px 16px;">Test Stars</button>
+            <button onclick="testWeather('sun')" style="margin: 5px; padding: 8px 16px;">Test Sun</button>
+            <button onclick="testWeather('mist')" style="margin: 5px; padding: 8px 16px;">Test Mist</button>
+        </div>
         
         <div class="search-box">
             <input type="text" id="search-input" placeholder="Search for a song..." autocomplete="off">
             <button onclick="searchSongs()">Search</button>
         </div>
         
-        <div id="login-prompt" class="login-prompt" style="display: none;">
-            <p>Please log in with Spotify to search for songs</p>
-            <a href="/auth/login">Log in with Spotify</a>
+        <div id="login-prompt" class="login-prompt glass" style="display: none;">
+            <p>Connect with Spotify to discover your vibe</p>
+            <a href="/auth/login">Connect Spotify</a>
         </div>
         
         <div id="search-results">
             <h2 class="section-title">Select a song</h2>
-            <div id="search-results-list" class="results-grid"></div>
+            <div id="search-results-list" class="results-grid glass"></div>
         </div>
         
         <div id="recommendations">
             <h2 class="section-title">Seed Track</h2>
-            <div id="seed-info"></div>
+            <div id="seed-info" class="glass"></div>
             
             <h2 class="section-title">Recommended Tracks</h2>
-            <div id="recommendations-list" class="results-grid"></div>
+            <div id="recommendations-list" class="results-grid glass"></div>
         </div>
     </div>
     
     <script>
+        const colorThief = new ColorThief();
         const searchInput = document.getElementById('search-input');
         const searchResultsDiv = document.getElementById('search-results');
         const searchResultsList = document.getElementById('search-results-list');
@@ -628,10 +917,161 @@ def home():
         const seedInfoDiv = document.getElementById('seed-info');
         const loginPrompt = document.getElementById('login-prompt');
         
-        // Search on Enter key
+        const rainContainer = document.getElementById('rain-container');
+        const sunContainer = document.getElementById('sun-container');
+        const mistContainer = document.getElementById('mist-container');
+        const starsContainer = document.getElementById('stars-container');
+
+        function testWeather(type) {
+        // Clear all first
+        rainContainer.classList.remove('active');
+        sunContainer.classList.remove('active');
+        mistContainer.classList.remove('active');
+        starsContainer.classList.remove('active');
+        
+        if (type === 'rain') {
+            document.documentElement.style.setProperty('--rain-intensity', 0.7);
+            generateRain(0.7);
+            rainContainer.classList.add('active');
+        }
+        if (type === 'stars') {
+            starsContainer.classList.add('active');
+        }
+        if (type === 'sun') {
+            document.documentElement.style.setProperty('--sun-intensity', 0.8);
+            sunContainer.classList.add('active');
+        }
+        if (type === 'mist') {
+            document.documentElement.style.setProperty('--mist-intensity', 0.6);
+            mistContainer.classList.add('active');
+        }
+    }
+        
+        // Generate rain
+        function generateRain(intensity) {
+            rainContainer.innerHTML = '';
+            const dropCount = Math.floor(intensity * 120);
+            
+            for (let i = 0; i < dropCount; i++) {
+                const drop = document.createElement('div');
+                drop.className = 'rain-drop';
+                drop.style.left = Math.random() * 100 + '%';
+                
+                // Random duration between 0.8s and 1.4s
+                const duration = 0.8 + Math.random() * 0.6;
+                drop.style.animationDuration = duration + 's';
+                
+                // KEY FIX: Random NEGATIVE delay so drops start at different Y positions
+                // This spreads them out vertically instead of all starting at the same line
+                drop.style.animationDelay = -(Math.random() * duration) + 's';
+                
+                drop.style.opacity = 0.3 + Math.random() * 0.4;
+                rainContainer.appendChild(drop);
+            }
+        }
+        
+        // Generate stars
+        function generateStars() {
+            starsContainer.innerHTML = '';
+            for (let i = 0; i < 80; i++) {
+                const star = document.createElement('div');
+                star.className = 'star';
+                star.style.left = Math.random() * 100 + '%';
+                star.style.top = Math.random() * 100 + '%';
+                star.style.animationDelay = Math.random() * 4 + 's';
+                star.style.width = (1 + Math.random() * 2) + 'px';
+                star.style.height = star.style.width;
+                starsContainer.appendChild(star);
+            }
+        }
+        generateStars();
+        
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') searchSongs();
         });
+        
+        function updateColorsFromImage(imgElement) {
+            try {
+                if (imgElement.complete) extractAndApply(imgElement);
+                else imgElement.addEventListener('load', () => extractAndApply(imgElement));
+            } catch (e) { console.log('Color extraction error:', e); }
+        }
+        
+        function extractAndApply(img) {
+            try {
+                const palette = colorThief.getPalette(img, 5);
+                if (palette && palette.length >= 5) {
+                    const colors = palette.map((c, i) => {
+                        const [r, g, b] = c;
+                        const darken = i === 0 ? 0.4 : 0.75;
+                        return `rgb(${Math.floor(r * darken)}, ${Math.floor(g * darken)}, ${Math.floor(b * darken)})`;
+                    });
+                    
+                    document.documentElement.style.setProperty('--color-1', colors[0]);
+                    document.documentElement.style.setProperty('--color-2', colors[1]);
+                    document.documentElement.style.setProperty('--color-3', colors[2]);
+                    document.documentElement.style.setProperty('--color-4', colors[3]);
+                    document.documentElement.style.setProperty('--color-5', colors[4]);
+                    
+                    // Tint clouds
+                    const [r, g, b] = palette[2];
+                    document.documentElement.style.setProperty('--cloud-tint',
+                        `rgba(${Math.min(r + 40, 255)}, ${Math.min(g + 40, 255)}, ${Math.min(b + 40, 255)}, 0.9)`);
+
+                }
+            } catch (e) { console.log('Color apply error:', e); }
+        }
+        
+        function updateWeather(themes) {
+            rainContainer.classList.remove('active');
+            sunContainer.classList.remove('active');
+            mistContainer.classList.remove('active');
+            starsContainer.classList.remove('active');
+            
+            if (!themes || themes.length === 0) return;
+            
+            const sadMoods = ['melancholy', 'heartbreak'];
+            const happyMoods = ['party_fun', 'empowerment', 'hope_inspiration'];
+            const calmMoods = ['nostalgia', 'love_romantic', 'sensual'];
+            const deepMoods = ['existential'];
+            
+            let sadCount = 0, happyCount = 0, calmCount = 0, deepCount = 0;
+            
+            themes.forEach(theme => {
+                if (sadMoods.includes(theme)) sadCount++;
+                if (happyMoods.includes(theme)) happyCount++;
+                if (calmMoods.includes(theme)) calmCount++;
+                if (deepMoods.includes(theme)) deepCount++;
+            });
+            
+            if (sadCount > 0) {
+                const intensity = Math.min(sadCount * 0.5, 1);
+                document.documentElement.style.setProperty('--rain-intensity', intensity);
+                generateRain(intensity);
+                rainContainer.classList.add('active');
+            }
+            
+            if (happyCount > 0) {
+                const intensity = Math.min(happyCount * 0.5, 1);
+                document.documentElement.style.setProperty('--sun-intensity', intensity);
+                sunContainer.classList.add('active');
+            }
+            
+            if (calmCount > 0 && sadCount === 0 && happyCount === 0) {
+                const intensity = Math.min(calmCount * 0.35, 0.7);
+                document.documentElement.style.setProperty('--mist-intensity', intensity);
+                mistContainer.classList.add('active');
+            }
+            
+            if (deepCount > 0) {
+                starsContainer.classList.add('active');
+            }
+            
+            // Rain + sun combo
+            if (sadCount > 0 && happyCount > 0) {
+                sunContainer.classList.add('active');
+            }
+        }
         
         async function searchSongs() {
             const query = searchInput.value.trim();
@@ -657,13 +1097,13 @@ def home():
                 }
                 
                 if (!data.results || data.results.length === 0) {
-                    searchResultsList.innerHTML = '<div class="error">No songs found. Try a different search.</div>';
+                    searchResultsList.innerHTML = '<div class="error">No songs found.</div>';
                     return;
                 }
                 
                 searchResultsList.innerHTML = data.results.map(track => `
                     <div class="track-card" onclick="getRecommendations('${track.id}', this)">
-                        <img src="${track.image || 'https://via.placeholder.com/56'}" alt="">
+                        <img src="${track.image || 'https://via.placeholder.com/60'}" alt="" crossorigin="anonymous">
                         <div class="track-info">
                             <div class="track-name">${escapeHtml(track.name)}</div>
                             <div class="track-artist">${escapeHtml(track.artists.join(', '))}</div>
@@ -671,16 +1111,17 @@ def home():
                         <div class="track-meta">${track.album || ''}</div>
                     </div>
                 `).join('');
-                
             } catch (err) {
-                searchResultsList.innerHTML = `<div class="error">Error searching: ${err.message}</div>`;
+                searchResultsList.innerHTML = `<div class="error">Error: ${err.message}</div>`;
             }
         }
         
         async function getRecommendations(trackId, element) {
-            // Highlight selected
             document.querySelectorAll('.track-card').forEach(el => el.classList.remove('selected'));
             element.classList.add('selected');
+            
+            const albumImg = element.querySelector('img');
+            updateColorsFromImage(albumImg);
             
             recommendationsList.innerHTML = '<div class="loading"><div class="spinner"></div><p>Finding similar vibes...</p></div>';
             recommendationsDiv.style.display = 'block';
@@ -694,23 +1135,20 @@ def home():
                     return;
                 }
                 
-                // Show seed info
                 const seed = data.seed;
-                seedInfoDiv.innerHTML = `
-                    <div class="seed-info">
-                        <img src="${element.querySelector('img').src}" alt="">
-                        <div class="seed-details">
-                            <h3>${escapeHtml(seed.name)}</h3>
-                            <p>${escapeHtml(seed.artists.join(', '))} · ${seed.year || ''}</p>
-                            <div class="rec-themes">
-                                ${(seed.detected_themes || []).map(t => `<span class="theme-tag">${t}</span>`).join('')}
-                                ${seed.lyrics_found ? '<span class="theme-tag">lyrics ✓</span>' : ''}
-                            </div>
-                        </div>
-                    </div>
-                `;
+                updateWeather(seed.detected_themes || []);
                 
-                // Show recommendations
+                seedInfoDiv.innerHTML = `
+                <div class="seed-info">
+                    <img src="${albumImg.src}" alt="" crossorigin="anonymous">
+                    <div class="seed-details">
+                    <h3>${escapeHtml(seed.name)}</h3>
+                    <p>${escapeHtml(seed.artists.join(', '))} · ${seed.year || ''}</p>
+                    </div>
+                </div>
+                `;
+
+                
                 if (!data.results || data.results.length === 0) {
                     recommendationsList.innerHTML = '<div class="error">No recommendations found.</div>';
                     return;
@@ -718,26 +1156,18 @@ def home():
                 
                 recommendationsList.innerHTML = data.results.map(track => `
                     <div class="recommendation-card">
-                        <img src="${track.image || 'https://via.placeholder.com/64'}" alt="">
+                        <img src="${track.image || 'https://via.placeholder.com/70'}" alt="" crossorigin="anonymous">
                         <div class="rec-info">
-                            <div class="rec-name">
-                                <a href="${track.url}" target="_blank">${escapeHtml(track.name)}</a>
-                            </div>
-                            <div class="rec-artist">${escapeHtml(track.artists.join(', '))}</div>
-                            <div class="rec-themes">
-                                ${(track.detected_themes || []).map(t => `<span class="theme-tag">${t}</span>`).join('')}
-                            </div>
+                        <div class="rec-name">
+                            <a href="${track.url}" target="_blank">${escapeHtml(track.name)}</a>
                         </div>
-                        <div class="rec-score">
-                            <div class="score-value">${Math.round(track.score * 100)}</div>
-                            <div class="score-label">match</div>
+                        <div class="rec-artist">${escapeHtml(track.artists.join(', '))}</div>
                         </div>
                     </div>
-                `).join('');
-                
-            } catch (err) {
-                recommendationsList.innerHTML = `<div class="error">Error: ${err.message}</div>`;
-            }
+                    `).join('');
+                } catch (err) {
+                    recommendationsList.innerHTML = `<div class="error">Error: ${err.message}</div>`;
+                }
         }
         
         function escapeHtml(text) {
@@ -1029,11 +1459,13 @@ def get_lyrics_for_track(song_name: str, artist_name: str) -> str | None:
 @app.get("/spotify/vibe_v5")
 def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
     """
-    Playlist co-occurrence + Lyrics analysis recommendations.
+    Playlist co-occurrence + Lyrics analysis + Last.fm recommendations.
     
     Combines:
     - Playlist co-occurrence (which songs humans group together)
     - Lyrics similarity (themes, sentiment, mood)
+    - Last.fm tags (user-generated genre/mood tags)
+    - Last.fm similar artists (community-driven similarity)
     - Era, genre, popularity signals
     """
     
@@ -1068,6 +1500,20 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
     
     seed_lyrics = get_lyrics_for_track(seed_name, seed_artist_name)
     seed_lyrics_analysis = analyze_lyrics(seed_lyrics) if seed_lyrics else {}
+    
+    # =========================================
+    # 2.5) FETCH SEED LAST.FM DATA
+    # =========================================
+    
+    seed_lastfm_tags = lastfm_get_artist_tags(seed_artist_name)
+    seed_similar_artists = lastfm_get_similar_artists(seed_artist_name)
+    
+    # =========================================
+    # 2.75) ANALYZE SEED ALBUM ART
+    # =========================================
+    
+    seed_album_image = (seed_album.get("images") or [{}])[0].get("url")
+    seed_album_art_analysis = analyze_album_art(seed_album_image) if seed_album_image else None
     
     # =========================================
     # 3) FIND PLAYLISTS & TRACK CO-OCCURRENCE
@@ -1147,7 +1593,63 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
                         "popularity": t.get("popularity", 0),
                         "image": (album.get("images") or [{}])[0].get("url"),
                         "url": (t.get("external_urls", {}) or {}).get("spotify"),
+                        "source": "playlist",
                     }
+    
+    # =========================================
+    # 3.5) SEARCH FOR TRACKS BY LAST.FM SIMILAR ARTISTS
+    # =========================================
+    
+    lastfm_candidates_added = 0
+    if seed_similar_artists:
+        # Search for top tracks by similar artists (limit to top 5 artists, 3 tracks each)
+        for similar_artist in seed_similar_artists[:5]:
+            # Search Spotify for this artist's tracks
+            search_data, err = spotify_get_json(
+                request,
+                "/search",
+                params={
+                    "q": f"artist:{similar_artist}",
+                    "type": "track",
+                    "limit": 5,
+                    "market": "US"
+                }
+            )
+            if err:
+                continue
+            
+            tracks = search_data.get("tracks", {}).get("items", []) or []
+            
+            for t in tracks[:3]:  # top 3 per artist
+                if not t or not t.get("id"):
+                    continue
+                
+                tid = t["id"]
+                if tid == track_id:
+                    continue
+                
+                # Skip if already found via playlist
+                if tid in candidate_data:
+                    # But boost its score since it's also a Last.fm similar artist
+                    candidate_playlist_count[tid] += 2
+                    continue
+                
+                album = t.get("album", {}) or {}
+                candidate_data[tid] = {
+                    "id": tid,
+                    "name": t.get("name", ""),
+                    "artists": [a.get("name", "") for a in (t.get("artists", []) or [])],
+                    "artist_ids": [a.get("id") for a in (t.get("artists", []) or []) if a.get("id")],
+                    "album": album.get("name", ""),
+                    "release_date": album.get("release_date"),
+                    "popularity": t.get("popularity", 0),
+                    "image": (album.get("images") or [{}])[0].get("url"),
+                    "url": (t.get("external_urls", {}) or {}).get("spotify"),
+                    "source": "lastfm_similar",
+                }
+                # Give them a baseline playlist count so they're competitive
+                candidate_playlist_count[tid] = 2
+                lastfm_candidates_added += 1
     
     if not candidate_data:
         return {
@@ -1177,25 +1679,33 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
                     genres_by_artist[a["id"]] = a.get("genres", [])
     
     # =========================================
-    # 5) FETCH LYRICS FOR TOP CANDIDATES & SCORE
+    # 5) FETCH LYRICS + LAST.FM FOR TOP CANDIDATES & SCORE
     # =========================================
     
-    # Sort candidates by playlist count to prioritize lyrics fetching
-    sorted_candidates = sorted(
-        candidate_data.items(),
-        key=lambda x: candidate_playlist_count.get(x[0], 0),
-        reverse=True
-    )
+    # Separate Last.fm candidates from playlist candidates
+    lastfm_candidates = [(tid, c) for tid, c in candidate_data.items() if c.get("source") == "lastfm_similar"]
+    playlist_candidates = [(tid, c) for tid, c in candidate_data.items() if c.get("source") != "lastfm_similar"]
+    
+    # Sort each group by playlist count
+    lastfm_candidates.sort(key=lambda x: candidate_playlist_count.get(x[0], 0), reverse=True)
+    playlist_candidates.sort(key=lambda x: candidate_playlist_count.get(x[0], 0), reverse=True)
+    
+    # Take top from each: prioritize Last.fm candidates, fill rest with playlist candidates
+    candidates_to_score = lastfm_candidates[:15] + playlist_candidates[:20]
     
     max_cooccurrence = max(candidate_playlist_count.values()) if candidate_playlist_count else 1
     scored_results = []
     lyrics_fetched = 0
+    lastfm_tags_fetched = 0
     max_lyrics_fetch = 8  # limit API calls
+    max_lastfm_fetch = 12  # slightly higher since it's faster
     
     # Cache for lyrics analysis
     lyrics_cache: dict[str, dict] = {}
+    # Cache for Last.fm tags (by artist)
+    candidate_tags_cache: dict[str, list[str]] = {}
     
-    for tid, c in sorted_candidates[:30]:  # limit to top 30 candidates for optimization
+    for tid, c in candidates_to_score:  # score mixed candidates
         # Build candidate genres
         candidate_genres = []
         for aid in c.get("artist_ids", []):
@@ -1213,12 +1723,12 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
         if looks_like_seasonal(filter_obj):
             continue
         
+        cand_name = c.get("name", "")
+        cand_artist = c.get("artists", [""])[0] if c.get("artists") else ""
+        
         # Fetch lyrics for top candidates (if we have seed lyrics)
         candidate_lyrics_analysis = {}
         if seed_lyrics_analysis and lyrics_fetched < max_lyrics_fetch:
-            cand_name = c.get("name", "")
-            cand_artist = c.get("artists", [""])[0] if c.get("artists") else ""
-            
             cache_key = f"{cand_name}|{cand_artist}".lower()
             
             if cache_key in lyrics_cache:
@@ -1230,6 +1740,22 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
                     lyrics_cache[cache_key] = candidate_lyrics_analysis
                     lyrics_fetched += 1
         
+        # Fetch Last.fm tags for candidate artist
+        candidate_lastfm_tags = []
+        if cand_artist:
+            artist_lower = cand_artist.lower()
+            if artist_lower in candidate_tags_cache:
+                candidate_lastfm_tags = candidate_tags_cache[artist_lower]
+            elif lastfm_tags_fetched < max_lastfm_fetch:
+                candidate_lastfm_tags = lastfm_get_artist_tags(cand_artist)
+                candidate_tags_cache[artist_lower] = candidate_lastfm_tags
+                if candidate_lastfm_tags:  # only count if we got results
+                    lastfm_tags_fetched += 1
+        
+        # Analyze candidate album art
+        candidate_image = c.get("image")
+        candidate_album_art_analysis = analyze_album_art(candidate_image) if candidate_image else None
+        
         # Get co-occurrence count
         cooccur_count = candidate_playlist_count.get(tid, 0)
         
@@ -1240,9 +1766,14 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
             seed_year=seed_year,
             seed_artist_ids=seed_artist_ids,
             seed_lyrics_analysis=seed_lyrics_analysis,
+            seed_lastfm_tags=seed_lastfm_tags,
+            seed_similar_artists=seed_similar_artists,
+            seed_album_art_analysis=seed_album_art_analysis,
             candidate=c,
             candidate_genres=candidate_genres,
             candidate_lyrics_analysis=candidate_lyrics_analysis,
+            candidate_lastfm_tags=candidate_lastfm_tags,
+            candidate_album_art_analysis=candidate_album_art_analysis,
             cooccurrence_count=cooccur_count,
             max_cooccurrence=max_cooccurrence,
         )
@@ -1296,6 +1827,9 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
             "url": (seed.get("external_urls", {}) or {}).get("spotify"),
             "detected_themes": seed_top_themes,
             "lyrics_found": bool(seed_lyrics),
+            "lastfm_tags": seed_lastfm_tags[:5],
+            "lastfm_similar_count": len(seed_similar_artists),
+            "album_art_analysis": seed_album_art_analysis,
         },
         "weights": WEIGHTS_V5,
         "count": len(final_results),
@@ -1306,26 +1840,8 @@ def spotify_vibe_v5(request: Request, track_id: str, limit: int = 20):
             "unique_candidates": len(candidate_data),
             "candidates_scored": len(scored_results),
             "lyrics_fetched": lyrics_fetched,
+            "lastfm_tags_fetched": lastfm_tags_fetched,
+            "lastfm_candidates_added": lastfm_candidates_added,
             "max_cooccurrence": max_cooccurrence,
         }
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,32 +1,325 @@
 """
-Vibe V5: Playlist Co-occurrence + Lyrics Analysis
+Vibe V5: Playlist Co-occurrence + Lyrics Analysis + Last.fm Integration
 
-Combines V4's playlist co-occurrence with lyrical similarity:
-- Sentiment (positive/negative/neutral)
-- Theme keywords (love, heartbreak, party, rebellion, etc.)
-- Mood matching
+Combines V4's playlist co-occurrence with:
+- Lyrical similarity (sentiment, themes, mood)
+- Last.fm user-generated tags (better genre coverage for indie artists)
+- Last.fm similar artists (community-driven similarity)
 
-Requires: GENIUS_ACCESS_TOKEN in .env
+Requires: GENIUS_ACCESS_TOKEN and LASTFM_API_KEY in .env
 """
 
 from collections import defaultdict, Counter
 from typing import Optional
 import re
 import os
+import requests
+
+from .lastfm_cache import (
+    get_cached_tags,
+    cache_tags,
+    get_cached_similar,
+    cache_similar,
+)
+
+from .album_art_cache import (
+    get_cached_album_art,
+    cache_album_art,
+)
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
+def get_lastfm_api_key():
+    """Get Last.fm API key (read at call time, not import time)."""
+    return os.getenv("LASTFM_API_KEY")
+
 WEIGHTS_V5 = {
-    "cooccurrence": 0.35,     # playlist co-occurrence
-    "lyrics": 0.20,           # lyrical/thematic similarity
-    "era": 0.15,              # temporal proximity
-    "genre": 0.12,            # if available
-    "popularity": 0.10,       # quality signal
-    "name_similarity": 0.08,  # penalize covers/same song
+    "cooccurrence": 0.30,      # playlist co-occurrence (was 0.32)
+    "lyrics": 0.18,            # lyrical/thematic similarity
+    "era": 0.10,               # temporal proximity (was 0.12)
+    "genre": 0.06,             # spotify genres
+    "popularity": 0.10,        # quality signal
+    "name_similarity": 0.08,   # penalize covers/same song
+    "lastfm_tags": 0.08,       # user-generated tags
+    "lastfm_similar": 0.06,    # community similar artists
+    "album_art": 0.04,         # NEW: visual aesthetic similarity
 }
+
+
+# ============================================================
+# LAST.FM API HELPERS
+# ============================================================
+
+def lastfm_get_artist_tags(artist_name: str) -> list[str]:
+    """
+    Fetch top tags for an artist from Last.fm.
+    Returns list of tag names (lowercase), or empty list on failure.
+    """
+    # Check cache first
+    cached = get_cached_tags(artist_name)
+    if cached is not None:
+        return cached
+    
+    api_key = get_lastfm_api_key()
+    if not api_key:
+        print("Last.fm API key not found")
+        return []
+    
+    url = "http://ws.audioscrobbler.com/2.0/"
+    params = {
+        "method": "artist.getTopTags",
+        "artist": artist_name,
+        "api_key": api_key,
+        "format": "json",
+    }
+    
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return []
+        
+        data = r.json()
+        
+        # Check for error response
+        if "error" in data:
+            cache_tags(artist_name, [])  # cache empty to avoid re-fetching
+            return []
+        
+        tags_data = data.get("toptags", {}).get("tag", [])
+        
+        # Extract tag names, filter low-count ones
+        tags = []
+        for t in tags_data[:15]:  # top 15 tags
+            name = t.get("name", "").lower().strip()
+            count = int(t.get("count", 0))
+            if name and count >= 10:  # only tags with decent usage
+                tags.append(name)
+        
+        cache_tags(artist_name, tags)
+        return tags
+        
+    except Exception as e:
+        print(f"Last.fm tags error for {artist_name}: {e}")
+        return []
+
+
+def lastfm_get_similar_artists(artist_name: str, limit: int = 20) -> list[str]:
+    """
+    Fetch similar artists from Last.fm.
+    Returns list of artist names (lowercase), or empty list on failure.
+    """
+    # Check cache first
+    cached = get_cached_similar(artist_name)
+    if cached is not None:
+        return cached
+    
+    api_key = get_lastfm_api_key()
+    if not api_key:
+        print("Last.fm API key not found")
+        return []
+    
+    url = "http://ws.audioscrobbler.com/2.0/"
+    params = {
+        "method": "artist.getSimilar",
+        "artist": artist_name,
+        "api_key": api_key,
+        "format": "json",
+        "limit": limit,
+    }
+    
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return []
+        
+        data = r.json()
+        
+        if "error" in data:
+            cache_similar(artist_name, [])
+            return []
+        
+        similar_data = data.get("similarartists", {}).get("artist", [])
+        
+        similar = []
+        for a in similar_data:
+            name = a.get("name", "").lower().strip()
+            if name:
+                similar.append(name)
+        
+        cache_similar(artist_name, similar)
+        return similar
+        
+    except Exception as e:
+        print(f"Last.fm similar error for {artist_name}: {e}")
+        return []
+
+
+# ============================================================
+# LAST.FM SCORING FUNCTIONS
+# ============================================================
+
+def score_lastfm_tags(seed_tags: list[str], candidate_tags: list[str]) -> float:
+    """
+    Compare Last.fm tags between seed and candidate.
+    Uses Jaccard similarity with partial match bonus.
+    """
+    if not seed_tags or not candidate_tags:
+        return 0.5  # neutral if either is missing
+    
+    seed_set = set(seed_tags)
+    cand_set = set(candidate_tags)
+    
+    # Exact matches
+    intersection = len(seed_set & cand_set)
+    union = len(seed_set | cand_set)
+    jaccard = intersection / union if union > 0 else 0
+    
+    # Partial matches (e.g., "indie rock" matches "indie")
+    partial_bonus = 0
+    for st in seed_set:
+        for ct in cand_set:
+            if st != ct:
+                # Check if one contains the other
+                if st in ct or ct in st:
+                    partial_bonus += 0.05
+                # Check word overlap
+                st_words = set(st.split())
+                ct_words = set(ct.split())
+                if st_words & ct_words:
+                    partial_bonus += 0.03
+    
+    return min(1.0, jaccard + partial_bonus)
+
+
+def score_lastfm_similar(
+    seed_artist: str,
+    candidate_artists: list[str],
+    similar_artists: list[str]
+) -> float:
+    """
+    Check if candidate's artists appear in seed's Last.fm similar artists.
+    Returns 1.0 if direct match, scaled score based on position, 0.3 if no match.
+    """
+    if not similar_artists or not candidate_artists:
+        return 0.5  # neutral if data missing
+    
+    # Normalize for comparison
+    similar_lower = [a.lower() for a in similar_artists]
+    
+    for cand_artist in candidate_artists:
+        cand_lower = cand_artist.lower()
+        
+        if cand_lower in similar_lower:
+            # Found! Score based on position (earlier = more similar)
+            position = similar_lower.index(cand_lower)
+            # Position 0 = 1.0, position 19 = 0.6
+            return 1.0 - (position * 0.02)
+    
+    return 0.3  # no match
+
+
+# ============================================================
+# ALBUM ART ANALYSIS
+# ============================================================
+
+def analyze_album_art(image_url: str) -> dict | None:
+    """
+    Analyze album art for visual characteristics.
+    Returns dict with brightness (0-1), saturation (0-1), warmth (-1 to 1).
+    """
+    if not image_url:
+        return None
+    
+    # Check cache first
+    cached = get_cached_album_art(image_url)
+    if cached is not None:
+        return cached
+    
+    try:
+        from PIL import Image
+        from io import BytesIO
+        
+        # Fetch image
+        response = requests.get(image_url, timeout=5)
+        if response.status_code != 200:
+            return None
+        
+        img = Image.open(BytesIO(response.content))
+        img = img.convert("RGB")
+        
+        # Resize to speed up analysis (64x64 is enough for color stats)
+        img = img.resize((64, 64))
+        
+        pixels = list(img.getdata())
+        
+        total_brightness = 0
+        total_saturation = 0
+        total_warmth = 0
+        
+        for r, g, b in pixels:
+            # Brightness: average of RGB, normalized to 0-1
+            brightness = (r + g + b) / (3 * 255)
+            total_brightness += brightness
+            
+            # Saturation: difference between max and min channel
+            max_c = max(r, g, b)
+            min_c = min(r, g, b)
+            if max_c > 0:
+                saturation = (max_c - min_c) / max_c
+            else:
+                saturation = 0
+            total_saturation += saturation
+            
+            # Warmth: red/yellow vs blue
+            # Positive = warm (more red/yellow), negative = cool (more blue)
+            warmth = ((r - b) / 255)  # Simple: red minus blue
+            total_warmth += warmth
+        
+        num_pixels = len(pixels)
+        
+        analysis = {
+            "brightness": round(total_brightness / num_pixels, 3),
+            "saturation": round(total_saturation / num_pixels, 3),
+            "warmth": round(total_warmth / num_pixels, 3),
+        }
+        
+        cache_album_art(image_url, analysis)
+        return analysis
+        
+    except Exception as e:
+        print(f"Album art analysis error: {e}")
+        return None
+
+
+def score_album_art_similarity(seed_analysis: dict | None, candidate_analysis: dict | None) -> float:
+    """
+    Compare album art visual characteristics.
+    Returns similarity score 0-1.
+    """
+    if not seed_analysis or not candidate_analysis:
+        return 0.5  # neutral if either is missing
+    
+    # Compare each dimension
+    brightness_diff = abs(seed_analysis.get("brightness", 0.5) - candidate_analysis.get("brightness", 0.5))
+    saturation_diff = abs(seed_analysis.get("saturation", 0.5) - candidate_analysis.get("saturation", 0.5))
+    warmth_diff = abs(seed_analysis.get("warmth", 0) - candidate_analysis.get("warmth", 0))
+    
+    # Convert differences to similarity scores (0 diff = 1.0, max diff = 0.0)
+    brightness_sim = 1.0 - brightness_diff
+    saturation_sim = 1.0 - saturation_diff
+    warmth_sim = 1.0 - (warmth_diff / 2)  # warmth ranges -1 to 1, so max diff is 2
+    
+    # Weighted combination (brightness matters most for "mood")
+    combined = (
+        brightness_sim * 0.5 +
+        saturation_sim * 0.3 +
+        warmth_sim * 0.2
+    )
+    
+    return round(combined, 3)
 
 
 # ============================================================
@@ -290,14 +583,19 @@ def compute_composite_score_v5(
     seed_year: Optional[int],
     seed_artist_ids: set[str],
     seed_lyrics_analysis: dict,
+    seed_lastfm_tags: list[str],
+    seed_similar_artists: list[str],
+    seed_album_art_analysis: dict | None,
     candidate: dict,
     candidate_genres: list[str],
     candidate_lyrics_analysis: dict,
+    candidate_lastfm_tags: list[str],
+    candidate_album_art_analysis: dict | None,
     cooccurrence_count: int,
     max_cooccurrence: int,
 ) -> dict:
     """
-    Compute final score with co-occurrence + lyrics + other signals.
+    Compute final score with co-occurrence + lyrics + Last.fm + album art + other signals.
     """
     
     # Parse candidate year
@@ -313,13 +611,27 @@ def compute_composite_score_v5(
     cand_artist_ids = set(candidate.get("artist_ids", []))
     is_same_artist = bool(cand_artist_ids & seed_artist_ids)
     
-    # Compute scores
+    # Get candidate artists for similar artist check
+    candidate_artists = candidate.get("artists", [])
+    
+    # Compute all scores
     cooccur_score = score_cooccurrence(cooccurrence_count, max_cooccurrence)
     lyrics_score = score_lyrics_similarity(seed_lyrics_analysis, candidate_lyrics_analysis)
     era_score = score_era_proximity(seed_year, cand_year)
     genre_score = score_genre_overlap(seed_genres, candidate_genres)
     pop_score = score_popularity(candidate.get("popularity", 0))
     name_score = score_name_similarity(seed_name, candidate.get("name", ""))
+    
+    # Last.fm scores
+    lastfm_tags_score = score_lastfm_tags(seed_lastfm_tags, candidate_lastfm_tags)
+    lastfm_similar_score = score_lastfm_similar(
+        seed_name,  # not actually used in current impl
+        candidate_artists,
+        seed_similar_artists
+    )
+    
+    # Album art score
+    album_art_score = score_album_art_similarity(seed_album_art_analysis, candidate_album_art_analysis)
     
     components = {
         "cooccurrence": round(cooccur_score, 3),
@@ -328,6 +640,9 @@ def compute_composite_score_v5(
         "genre": round(genre_score, 3),
         "popularity": round(pop_score, 3),
         "name_similarity": round(name_score, 3),
+        "lastfm_tags": round(lastfm_tags_score, 3),
+        "lastfm_similar": round(lastfm_similar_score, 3),
+        "album_art": round(album_art_score, 3),
         "playlist_count": cooccurrence_count,
     }
     
@@ -338,7 +653,10 @@ def compute_composite_score_v5(
         WEIGHTS_V5["era"] * era_score +
         WEIGHTS_V5["genre"] * genre_score +
         WEIGHTS_V5["popularity"] * pop_score +
-        WEIGHTS_V5["name_similarity"] * name_score
+        WEIGHTS_V5["name_similarity"] * name_score +
+        WEIGHTS_V5["lastfm_tags"] * lastfm_tags_score +
+        WEIGHTS_V5["lastfm_similar"] * lastfm_similar_score +
+        WEIGHTS_V5["album_art"] * album_art_score
     )
     
     # Same-artist penalty
