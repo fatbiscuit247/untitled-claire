@@ -313,7 +313,7 @@ def home():
             padding: 0;
         }
         
-        :root {
+        :root{
             --color-1: #1a1a2e;
             --color-2: #16213e;
             --color-3: #0f3460;
@@ -327,8 +327,12 @@ def home():
             --glass-border: rgba(255, 255, 255, 0.15);
             --text-primary: rgba(255, 255, 255, 0.95);
             --text-secondary: rgba(255, 255, 255, 0.6);
+            
+            transition: --color-1 4s ease-in-out,
+                        --color-2 4s ease-in-out,
+                        --color-3 4s ease-in-out,
+                        --color-4 4s ease-in-out;
         }
-        
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             min-height: 100vh;
@@ -351,7 +355,7 @@ def home():
                 var(--color-3) 60%,
                 var(--color-4) 100%
             );
-            transition: all 2s ease;
+            transition: all 4s ease;
         }
         
     
@@ -529,7 +533,7 @@ def home():
         }
 
         .sun-container.active {
-            opacity: var(--sun-intensity, 0.8);
+            opacity: var(--sun-intensity, 0.5);
         }
 
         .sun, .sun-rays {
@@ -610,12 +614,84 @@ def home():
             0%, 100% { opacity: 0.2; transform: scale(1); }
             50% { opacity: 1; transform: scale(1.3); }
         }
-        
+
+        /* ============== SHOOTING STARS ============== */
+        .shooting-star {
+            position: fixed;
+            width: 4px;
+            height: 4px;
+            background: white;
+            border-radius: 50%;
+            box-shadow: 
+                0 0 6px 2px rgba(255, 255, 255, 0.9),
+                0 0 12px 4px rgba(200, 220, 255, 0.6);
+            opacity: 0;
+            z-index: -4;
+            pointer-events: none;
+        }
+
+        .shooting-star::after {
+            content: '';
+            position: absolute;
+            top: 50%;
+            right: 4px;
+            width: 80px;
+            height: 2px;
+            background: linear-gradient(to left, rgba(255, 255, 255, 0.8), transparent);
+            transform: translateY(-50%);
+            border-radius: 2px;
+        }
+
+        .shooting-star.active {
+            animation: shootingStar 1.2s ease-out forwards;
+        }
+
+        @keyframes shootingStar {
+            0% {
+                opacity: 1;
+                transform: translate(0, 0) rotate(-35deg);
+            }
+            70% {
+                opacity: 1;
+            }
+            100% {
+                opacity: 0;
+                transform: translate(-250px, 180px) rotate(-35deg);
+            }
+        }
+
+        /* ============== TITLE SECTION ============== */
+     
+        .title-section {
+            position: fixed;
+            top: 6%;
+            left: 0;
+            width: 100%;
+            z-index: 15;
+            text-align: center;
+            pointer-events: none;
+        }
+
+        .title-section h1 {
+            font-size: 3.5rem;
+            font-weight: 200;
+            letter-spacing: 0.25em;
+            margin-bottom: 8px;
+            text-shadow: 0 0 60px rgba(255, 255, 255, 0.4);
+        }
+
+        .title-section .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            font-weight: 300;
+            letter-spacing: 0.08em;
+            margin-bottom: 0;
+        }
         /* ============== CONTENT ============== */
         .container {
             max-width: 800px;
             margin: 0 auto;
-            padding: 40px 20px;
+            padding: 450px 20px 40px 20px;
             position: relative;
             z-index: 1;
         }
@@ -630,11 +706,11 @@ def home():
         
         h1 {
             text-align: center;
-            font-size: 3rem;
-            font-weight: 300;
-            letter-spacing: 0.1em;
+            font-size: 3.5rem;           /* slightly bigger */
+            font-weight: 200;            /* lighter/more elegant */
+            letter-spacing: 0.2em;       /* more spread out */
             margin-bottom: 8px;
-            text-shadow: 0 0 40px rgba(255, 255, 255, 0.3);
+            text-shadow: 0 0 60px rgba(255, 255, 255, 0.3);
         }
         
         .subtitle {
@@ -870,18 +946,19 @@ def home():
         <div class="mist-layer"></div>
         <div class="mist-layer"></div>
     </div>
+
+    <!-- Shooting Stars -->
+    <div id="shooting-stars-container"></div>
+
+    <!-- Title (centered on clouds) -->
+    <div class="title-section">
+        <h1>Soundscape</h1>
+        <p class="subtitle">escape into music</p>
+    </div>
     
     <!-- Content -->
     <div class="container">
-        <h1>Vibe Finder</h1>
-        <p class="subtitle">discover your sound</p>
-
-        <div style="text-align: center; margin-bottom: 20px;">
-            <button onclick="testWeather('rain')" style="margin: 5px; padding: 8px 16px;">Test Rain</button>
-            <button onclick="testWeather('stars')" style="margin: 5px; padding: 8px 16px;">Test Stars</button>
-            <button onclick="testWeather('sun')" style="margin: 5px; padding: 8px 16px;">Test Sun</button>
-            <button onclick="testWeather('mist')" style="margin: 5px; padding: 8px 16px;">Test Mist</button>
-        </div>
+        
         
         <div class="search-box">
             <input type="text" id="search-input" placeholder="Search for a song..." autocomplete="off">
@@ -985,6 +1062,44 @@ def home():
             }
         }
         generateStars();
+
+        // Shooting stars
+        function createShootingStar() {
+            const container = document.getElementById('shooting-stars-container');
+            const star = document.createElement('div');
+            star.className = 'shooting-star';
+            
+            // Random position in upper-right area (above clouds)
+            const startX = 50 + Math.random() * 45; // 50-95% from left
+            const startY = 5 + Math.random() * 25;  // 5-30% from top
+            
+            star.style.left = startX + '%';
+            star.style.top = startY + '%';
+            
+            container.appendChild(star);
+            
+            // Trigger animation
+            requestAnimationFrame(() => {
+                star.classList.add('active');
+            });
+            
+            // Remove after animation
+            setTimeout(() => {
+                star.remove();
+            }, 1500);
+        }
+
+        // Random shooting stars every 15-25 seconds
+        function scheduleRandomShootingStar() {
+            const delay = 15000 + Math.random() * 10000; // 15-25 seconds
+            setTimeout(() => {
+                createShootingStar();
+                scheduleRandomShootingStar(); // Schedule next one
+            }, delay);
+        }
+
+        // Start the random shooting stars
+        scheduleRandomShootingStar();
         
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') searchSongs();
@@ -1001,23 +1116,81 @@ def home():
             try {
                 const palette = colorThief.getPalette(img, 5);
                 if (palette && palette.length >= 5) {
-                    const colors = palette.map((c, i) => {
-                        const [r, g, b] = c;
-                        const darken = i === 0 ? 0.4 : 0.75;
-                        return `rgb(${Math.floor(r * darken)}, ${Math.floor(g * darken)}, ${Math.floor(b * darken)})`;
+                    
+                    function getBrightness(r, g, b) {
+                        return (r * 299 + g * 587 + b * 114) / 1000;
+                    }
+                    
+                    // Calculate target colors
+                    const targetColors = palette.map((c, i) => {
+                        let [r, g, b] = c;
+                        const brightness = getBrightness(r, g, b);
+                        
+                        let darken;
+                        if (i === 0) {
+                            darken = brightness > 150 ? 0.25 : 0.4;
+                        } else if (i === 1) {
+                            darken = brightness > 150 ? 0.35 : 0.55;
+                        } else {
+                            darken = brightness > 150 ? 0.45 : 0.7;
+                        }
+                        
+                        return {
+                            r: Math.floor(r * darken),
+                            g: Math.floor(g * darken),
+                            b: Math.floor(b * darken)
+                        };
                     });
                     
-                    document.documentElement.style.setProperty('--color-1', colors[0]);
-                    document.documentElement.style.setProperty('--color-2', colors[1]);
-                    document.documentElement.style.setProperty('--color-3', colors[2]);
-                    document.documentElement.style.setProperty('--color-4', colors[3]);
-                    document.documentElement.style.setProperty('--color-5', colors[4]);
+                    // Get current colors
+                    const getCurrentColor = (varName) => {
+                        const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
+                        const match = value.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+                        if (match) {
+                            return { r: parseInt(match[1]), g: parseInt(match[2]), b: parseInt(match[3]) };
+                        }
+                        return { r: 26, g: 26, b: 46 }; // default fallback
+                    };
                     
-                    // Tint clouds
+                    const currentColors = [
+                        getCurrentColor('--color-1'),
+                        getCurrentColor('--color-2'),
+                        getCurrentColor('--color-3'),
+                        getCurrentColor('--color-4'),
+                        getCurrentColor('--color-5')
+                    ];
+                    
+                    // Animate over 3 seconds
+                    const duration = 3000;
+                    const startTime = performance.now();
+                    
+                    function animateColors(currentTime) {
+                        const elapsed = currentTime - startTime;
+                        const progress = Math.min(elapsed / duration, 1);
+                        
+                        // Ease-in-out curve
+                        const eased = progress < 0.5 
+                            ? 2 * progress * progress 
+                            : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+                        
+                        for (let i = 0; i < 5; i++) {
+                            const r = Math.round(currentColors[i].r + (targetColors[i].r - currentColors[i].r) * eased);
+                            const g = Math.round(currentColors[i].g + (targetColors[i].g - currentColors[i].g) * eased);
+                            const b = Math.round(currentColors[i].b + (targetColors[i].b - currentColors[i].b) * eased);
+                            document.documentElement.style.setProperty(`--color-${i + 1}`, `rgb(${r}, ${g}, ${b})`);
+                        }
+                        
+                        if (progress < 1) {
+                            requestAnimationFrame(animateColors);
+                        }
+                    }
+                    
+                    requestAnimationFrame(animateColors);
+                    
+                    // Tint clouds (this can stay instant, it's subtle)
                     const [r, g, b] = palette[2];
                     document.documentElement.style.setProperty('--cloud-tint',
                         `rgba(${Math.min(r + 40, 255)}, ${Math.min(g + 40, 255)}, ${Math.min(b + 40, 255)}, 0.9)`);
-
                 }
             } catch (e) { console.log('Color apply error:', e); }
         }
@@ -1044,35 +1217,41 @@ def home():
                 if (deepMoods.includes(theme)) deepCount++;
             });
             
+            // Rain for sad moods
             if (sadCount > 0) {
-                const intensity = Math.min(sadCount * 0.5, 1);
+                const intensity = Math.min(sadCount * 0.4, 0.8);
                 document.documentElement.style.setProperty('--rain-intensity', intensity);
                 generateRain(intensity);
                 rainContainer.classList.add('active');
             }
             
+            // Sun for happy moods (can combine with rain = bittersweet)
             if (happyCount > 0) {
-                const intensity = Math.min(happyCount * 0.5, 1);
+                const intensity = Math.min(happyCount * 0.4, 0.8);
                 document.documentElement.style.setProperty('--sun-intensity', intensity);
                 sunContainer.classList.add('active');
             }
             
-            if (calmCount > 0 && sadCount === 0 && happyCount === 0) {
-                const intensity = Math.min(calmCount * 0.35, 0.7);
+            // Mist for calm/romantic moods (can combine with others now!)
+            if (calmCount > 0) {
+                // Reduce intensity if other effects are active
+                const baseIntensity = Math.min(calmCount * 0.3, 0.6);
+                const intensity = (sadCount > 0 || happyCount > 0) ? baseIntensity * 0.6 : baseIntensity;
                 document.documentElement.style.setProperty('--mist-intensity', intensity);
                 mistContainer.classList.add('active');
             }
             
+            // Stars for existential/deep moods (can combine with anything)
             if (deepCount > 0) {
                 starsContainer.classList.add('active');
             }
             
-            // Rain + sun combo
-            if (sadCount > 0 && happyCount > 0) {
-                sunContainer.classList.add('active');
+            // Bonus: Add stars for very calm romantic nights too
+            if (calmCount >= 2 && happyCount === 0) {
+                starsContainer.classList.add('active');
             }
         }
-        
+                
         async function searchSongs() {
             const query = searchInput.value.trim();
             if (!query) return;
@@ -1136,6 +1315,8 @@ def home():
                 }
                 
                 const seed = data.seed;
+                // Celebration shooting star!
+                createShootingStar();   
                 updateWeather(seed.detected_themes || []);
                 
                 seedInfoDiv.innerHTML = `

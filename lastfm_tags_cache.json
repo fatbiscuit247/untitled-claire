@@ -1163,5 +1163,157 @@
     "indie pop",
     "my top songs",
     "indie"
+  ],
+  "finneas": [
+    "indie pop",
+    "alternative",
+    "singer-songwriter",
+    "indie",
+    "my top songs"
+  ],
+  "ashe": [
+    "future garage",
+    "trip hop",
+    "microhouse",
+    "downtempo",
+    "ambient house"
+  ],
+  "ariana grande": [
+    "pop",
+    "rnb",
+    "female vocalists"
+  ],
+  "charli xcx": [
+    "pop",
+    "synthpop",
+    "electronic",
+    "female vocalists",
+    "electroclash",
+    "electropop",
+    "hyperpop"
+  ],
+  "the strokes": [
+    "indie rock",
+    "indie",
+    "rock",
+    "alternative",
+    "alternative rock"
+  ],
+  "jon batiste": [
+    "jazz",
+    "soul"
+  ],
+  "league of legends": [
+    "soundtrack",
+    "game music",
+    "video game music",
+    "all"
+  ],
+  "albert hammond jr": [
+    "indie",
+    "indie rock",
+    "singer-songwriter",
+    "alternative",
+    "rock"
+  ],
+  "ax and the hatchetmen": [
+    "indie pop",
+    "pop",
+    "usa"
+  ],
+  "interpol": [
+    "post-punk",
+    "indie rock",
+    "indie",
+    "alternative",
+    "rock"
+  ],
+  "the last shadow puppets": [
+    "indie",
+    "british",
+    "indie rock",
+    "alternative",
+    "rock"
+  ],
+  "vampire weekend": [
+    "indie",
+    "indie rock",
+    "indie pop",
+    "alternative",
+    "rock"
+  ],
+  "julian casablancas": [
+    "indie",
+    "indie rock",
+    "rock",
+    "singer-songwriter"
+  ],
+  "of monsters and men": [
+    "indie",
+    "folk",
+    "indie pop",
+    "icelandic",
+    "iceland"
+  ],
+  "bad bunny": [
+    "reggaeton",
+    "latin",
+    "trap",
+    "puerto rico",
+    "trap latino"
+  ],
+  "tainy": [
+    "reggaeton",
+    "latin",
+    "puerto rico"
+  ],
+  "mora": [
+    "puerto rico",
+    "latin",
+    "noise",
+    "reggaeton"
+  ],
+  "j balvin": [
+    "reggaeton",
+    "pop",
+    "colombian",
+    "latin"
+  ],
+  "cardi b": [
+    "hip-hop",
+    "rap",
+    "trap",
+    "hip hop"
+  ],
+  "amesty": [],
+  "enzo durand": [],
+  "hector brian": [],
+  "lent cent": [],
+  "young cister": [
+    "latin",
+    "hip hop",
+    "chile",
+    "trap"
+  ],
+  "easykid": [
+    "reggaeton",
+    "chile",
+    "breakbeat",
+    "rage",
+    "liquid drum and bass",
+    "pop rap",
+    "neoperreo"
+  ],
+  "rels b": [
+    "rap",
+    "hip hop",
+    "rnb",
+    "hip-hop"
+  ],
+  "elena rose": [
+    "pop",
+    "latin",
+    "rnb",
+    "venezuela"
   ]
 }
