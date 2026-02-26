@@ -1693,5 +1693,50 @@
     "brightness": 0.233,
     "saturation": 0.888,
     "warmth": -0.197
+  },
+  "ab67616d0000b2733c8a560919c8e841fd34ad5f": {
+    "brightness": 0.716,
+    "saturation": 0.219,
+    "warmth": 0.102
+  },
+  "ab67616d0000b27327b470ee2ad6b70fa4c73c34": {
+    "brightness": 0.396,
+    "saturation": 0.264,
+    "warmth": 0.105
+  },
+  "ab67616d0000b2734fa02559621cbe018f37af99": {
+    "brightness": 0.257,
+    "saturation": 0.482,
+    "warmth": 0.16
+  },
+  "ab67616d0000b2730a921fb6a0b94a6d2c6c6c71": {
+    "brightness": 0.446,
+    "saturation": 0.035,
+    "warmth": -0.01
+  },
+  "ab67616d0000b27395e2fd1accb339fa14878190": {
+    "brightness": 0.64,
+    "saturation": 0.228,
+    "warmth": -0.011
+  },
+  "ab67616d0000b273aaa285930cd1623de3eb60c5": {
+    "brightness": 0.623,
+    "saturation": 0.248,
+    "warmth": -0.048
+  },
+  "ab67616d0000b2734aa759dc714b31f86abcd9fd": {
+    "brightness": 0.669,
+    "saturation": 0.376,
+    "warmth": 0.207
+  },
+  "ab67616d0000b273254deb29b1e07b974e38c182": {
+    "brightness": 0.315,
+    "saturation": 0.452,
+    "warmth": -0.117
+  },
+  "ab67616d0000b273a3b3f48ca81acacb3ad4ec8a": {
+    "brightness": 0.617,
+    "saturation": 0.278,
+    "warmth": 0.02
   }
 }

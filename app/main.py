@@ -361,14 +361,15 @@ def home():
     
         /* ============== TOP SKY CLOUD LAYER ============== */
         .clouds-container{
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 55vh;        /* Only top portion */
-        overflow: hidden;
-        pointer-events: none;
-        z-index: -8;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 55vh;        /* Only top portion */
+            overflow: hidden;
+            pointer-events: none;
+            z-index: -8;
+            mask-image: linear-gradient(to bottom, black 70%, transparent 100%)
         }
 
         /* Base cloud style */
@@ -465,6 +466,16 @@ def home():
             height: 420px;
             opacity: 0.50;
             background-image: url('/static/clouds/cloud4.png'); /* <-- change to your new image file */
+            animation: floaty 34s ease-in-out infinite;
+        }
+
+        .cloud-8 {
+            top: -5px;
+            left: -190px;
+            width: 900px;
+            height: 460px;
+            opacity: 0.70;
+            background-image: url('/static/clouds/cloud2.png');
             animation: floaty 34s ease-in-out infinite;
         }
 
@@ -664,9 +675,9 @@ def home():
      
         .title-section {
             position: fixed;
-            top: 6%;
-            left: 0;
-            width: 100%;
+            top: 42%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             z-index: 15;
             text-align: center;
             pointer-events: none;
@@ -691,7 +702,7 @@ def home():
         .container {
             max-width: 800px;
             margin: 0 auto;
-            padding: 450px 20px 40px 20px;
+            padding: 20px 20px 40px 20px
             position: relative;
             z-index: 1;
         }
@@ -929,7 +940,7 @@ def home():
         <div class="cloud cloud-5"></div>
         <div class="cloud cloud-6"></div>
         <div class="cloud cloud-7"></div>
-
+        <div class="cloud cloud-8"></div>
     </div>
     
     <!-- Stars -->
@@ -953,18 +964,23 @@ def home():
     <!-- Title (centered on clouds) -->
     <div class="title-section">
         <h1>Soundscape</h1>
-        <p class="subtitle">escape into music</p>
+        <p class="subtitle">escape through music</p>
+        <div class="search-box" style="pointer-events: all; margin-top: 30px; width: 550px; margin-left: auto; margin-right: auto;">
+            <input type="text" id="search-input" placeholder="Search for a song... discover music that matches its mood" autocomplete="off">
+            <button onclick="searchSongs()" style="padding: 18px 20px; min-width: unset;">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+            </button>
+        </div>
     </div>
     
     <!-- Content -->
     <div class="container">
         
         
-        <div class="search-box">
-            <input type="text" id="search-input" placeholder="Search for a song..." autocomplete="off">
-            <button onclick="searchSongs()">Search</button>
-        </div>
-        
+    
         <div id="login-prompt" class="login-prompt glass" style="display: none;">
             <p>Connect with Spotify to discover your vibe</p>
             <a href="/auth/login">Connect Spotify</a>
@@ -1245,9 +1261,14 @@ def home():
             if (deepCount > 0) {
                 starsContainer.classList.add('active');
             }
-            
-            // Bonus: Add stars for very calm romantic nights too
-            if (calmCount >= 2 && happyCount === 0) {
+
+            // Bonus: Add stars for calm romantic nights too (more lenient)
+            if (calmCount >= 1 && happyCount === 0 && sadCount === 0) {
+                starsContainer.classList.add('active');
+            }
+
+            // Also add stars for nostalgic + hopeful combo (dreamy night vibe)
+            if (themes.includes('nostalgia') && !themes.includes('party_fun')) {
                 starsContainer.classList.add('active');
             }
         }
@@ -1317,6 +1338,8 @@ def home():
                 const seed = data.seed;
                 // Celebration shooting star!
                 createShootingStar();   
+                console.log('Detected themes:', seed.detected_themes);
+                updateWeather(seed.detected_themes || []);  
                 updateWeather(seed.detected_themes || []);
                 
                 seedInfoDiv.innerHTML = `
